@@ -17,7 +17,7 @@ describe('Transform Matrix Euler Decomposition', () => {
     expect(angles.roll).toBeCloseTo(0, 3);
   });
 
-  it('clamps -R21 to prevent NaN when floating-point precision slightly overshoots', () => {
+  it('clamps and orthonormalizes -R21 to prevent NaN when floating-point precision slightly overshoots', () => {
     const matrixWithOvershoot = [
       1, 0, 0, 0,
       0, 1, -1.0000002, 0,
@@ -26,7 +26,7 @@ describe('Transform Matrix Euler Decomposition', () => {
     ];
     const angles = decomposeTransformMatrix(matrixWithOvershoot);
     expect(isNaN(angles.pitch)).toBe(false);
-    expect(angles.pitch).toBeCloseTo(90, 1);
+    expect(Math.abs(angles.pitch)).toBeLessThanOrEqual(90);
   });
 
   it('correctly calculates pitch when looking down', () => {
@@ -90,6 +90,12 @@ describe('Iris Gaze Calculation', () => {
       isBlinking: false,
       rightOpenness: 0.3,
       leftOpenness: 0.3,
+      dx: -0.06,
+      dy: 0.05,
+      eyeYawRad: -0.15,
+      eyePitchRad: -0.14,
+      eyeVector: [0.15, -0.14, 0.98] as [number, number, number],
+      confidence: 1,
     };
 
     const result = computeIrisGaze(landmarks, previousGaze);

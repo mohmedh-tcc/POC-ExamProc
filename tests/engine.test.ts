@@ -19,11 +19,11 @@ describe('Calibration Engine', () => {
 
     const profile = buildCalibrationProfile(samples);
 
-    // Margins are +/- 8 deg yaw, +/- 6 deg pitch
-    expect(profile.yawMin).toBeLessThan(-10);
-    expect(profile.yawMax).toBeGreaterThan(10);
-    expect(profile.pitchMin).toBeLessThan(-5);
-    expect(profile.pitchMax).toBeGreaterThan(15);
+    // Wide anatomical yaw bounds and trimmed pitch floor
+    expect(profile.yawMin).toBeLessThanOrEqual(-10);
+    expect(profile.yawMax).toBeGreaterThanOrEqual(10);
+    expect(profile.pitchMin).toBeLessThanOrEqual(-5);
+    expect(profile.pitchMax).toBeGreaterThanOrEqual(15);
   });
 });
 

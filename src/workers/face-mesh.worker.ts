@@ -13,6 +13,8 @@ const yawFilter = new OneEuroFilter(1.0, 0.007);
 const rollFilter = new OneEuroFilter(1.0, 0.007);
 const hRatioFilter = new OneEuroFilter(1.0, 0.007);
 const vRatioFilter = new OneEuroFilter(1.0, 0.007);
+const dxFilter = new OneEuroFilter(1.0, 0.007);
+const dyFilter = new OneEuroFilter(1.0, 0.007);
 
 let previousGaze: IrisGazeResult | undefined = undefined;
 
@@ -97,15 +99,17 @@ self.onmessage = async (e: MessageEvent) => {
 
       let angles: EulerAngles | null = null;
       let rawAngles: EulerAngles | null = null;
+      let transformMatrix: number[] | undefined = undefined;
       let gaze: IrisGazeResult | null = null;
       let landmarks: NormalizedLandmark[] | null = null;
 
       if (faceCount > 0) {
         landmarks = results.faceLandmarks[0] as NormalizedLandmark[];
 
-        // 1. Head Pose Euler decomposition
+        // 1. Head Pose Euler decomposition + raw 4x4 matrix
         if (results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
           const matrix = results.facialTransformationMatrixes[0];
+          transformMatrix = Array.from(matrix.data);
           rawAngles = decomposeTransformMatrix(matrix.data);
 
           // Apply One-Euro filter to damp jitter from disabled single-face smoothing
@@ -116,16 +120,22 @@ self.onmessage = async (e: MessageEvent) => {
           };
         }
 
-        // 2. Iris Gaze estimation
+        // 2. Aspect-corrected, yaw-foreshortening-compensated Iris Gaze estimation
         if (landmarks) {
-          const rawGaze = computeIrisGaze(landmarks, previousGaze);
+          const aspectRatio = bitmap.width / Math.max(1, bitmap.height);
+          const headYawRad = angles ? (angles.yaw * Math.PI) / 180 : 0;
+          const rawGaze = computeIrisGaze(landmarks, previousGaze, {
+            aspectRatio,
+            headYawRad,
+          });
           if (!rawGaze.isBlinking) {
             gaze = {
+              ...rawGaze,
               hRatio: hRatioFilter.filter(rawGaze.hRatio, lastTimestamp),
               vRatio: vRatioFilter.filter(rawGaze.vRatio, lastTimestamp),
+              dx: dxFilter.filter(rawGaze.dx, lastTimestamp),
+              dy: dyFilter.filter(rawGaze.dy, lastTimestamp),
               isBlinking: false,
-              rightOpenness: rawGaze.rightOpenness,
-              leftOpenness: rawGaze.leftOpenness,
             };
           } else {
             gaze = rawGaze;
@@ -140,6 +150,7 @@ self.onmessage = async (e: MessageEvent) => {
         faceCount,
         angles,
         rawAngles,
+        transformMatrix,
         gaze,
         latencyMs,
         timestamp: clientTimestamp,

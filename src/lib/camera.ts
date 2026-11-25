@@ -6,6 +6,7 @@ export interface FaceDetectionEvent {
   faceCount: number;
   angles: EulerAngles | null;
   rawAngles: EulerAngles | null;
+  transformMatrix?: number[];
   gaze: IrisGazeResult | null;
   latencyMs: number;
   timestamp: number;

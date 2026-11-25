@@ -6,13 +6,11 @@ import {
   CalibrationSample,
   AdaptiveDriftTracker,
   buildAutoBaselineProfile,
-  computeCombinedGaze,
   mapGazeToScreen,
 } from '../lib/engine/calibrator';
 import {
   SignalType,
   DebounceStateMachine,
-  SIGNAL_DEFINITIONS,
   DebounceState,
 } from '../lib/engine/state-machine';
 import { LeakyBucketEngine, RiskLevel } from '../lib/engine/leaky-bucket';
@@ -25,7 +23,25 @@ import { CalibrationModal } from '../components/CalibrationModal';
 import { TestRunner } from './test-runner';
 import { EulerAngles } from '../lib/math/transform-matrix';
 import { IrisGazeResult, NormalizedLandmark } from '../lib/math/iris-gaze';
-import { Camera, CheckCircle2, AlertCircle, Compass, Play, ShieldAlert } from 'lucide-react';
+import { Compass } from 'lucide-react';
+
+/**
+ * Extended FaceDetectionEvent type supporting optional raw 4x4 transformation matrix
+ * forwarded from the FaceLandmarker Web Worker.
+ */
+type ExtendedFaceDetectionEvent = FaceDetectionEvent & {
+  transformMatrix?: number[] | Float32Array;
+};
+
+/**
+ * Anatomical head-pose fallback limits (degrees from neutral).
+ * Beyond +-35 deg yaw, the far eye is occluded by the nasal bridge and monocular iris
+ * estimation degrades, so extreme head turns still flag HEAD_OFF_SCREEN as a safety guardrail.
+ * Within +-35 deg, the 3D VOR-compensated gaze model decides on-screen vs. off-screen.
+ */
+const ANATOMICAL_YAW_LIMIT_DEG = 35;
+const ANATOMICAL_PITCH_UP_LIMIT_DEG = 28;
+const LOOKING_DOWN_GAZE_THRESHOLD = 1.12; // Normalized screen y > 1.12 (below bottom bezel)
 
 export const DiagnosticPlayground: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -55,6 +71,7 @@ export const DiagnosticPlayground: React.FC = () => {
   // Detection states
   const [faceCount, setFaceCount] = useState(0);
   const [angles, setAngles] = useState<EulerAngles | null>(null);
+  const [transformMatrix, setTransformMatrix] = useState<number[] | undefined>(undefined);
   const [gaze, setGaze] = useState<IrisGazeResult | null>(null);
   const [keyPoints, setKeyPoints] = useState<NormalizedLandmark[] | null>(null);
   const [showMesh, setShowMesh] = useState(true);
@@ -138,9 +155,10 @@ export const DiagnosticPlayground: React.FC = () => {
           [`${workerName}Delegate`]: delegate,
         }));
       },
-      onFaceResult: (data: FaceDetectionEvent) => {
+      onFaceResult: (data: ExtendedFaceDetectionEvent) => {
         setFaceCount(data.faceCount);
         setAngles(data.angles);
+        setTransformMatrix(data.transformMatrix);
         setGaze(data.gaze);
         setKeyPoints(data.keyPoints);
 
@@ -186,7 +204,7 @@ export const DiagnosticPlayground: React.FC = () => {
   }, [fastDevMode]);
 
   // Evaluates Face Signals (NO_FACE, EXTRA_FACE, HEAD_OFF_SCREEN, LOOKING_DOWN)
-  const handleFaceSignals = (data: FaceDetectionEvent) => {
+  const handleFaceSignals = (data: ExtendedFaceDetectionEvent) => {
     const now = Date.now();
 
     // 1. NO_FACE: no face in 90% of samples for 4s (at 5Hz = 20 samples)
@@ -210,8 +228,12 @@ export const DiagnosticPlayground: React.FC = () => {
       warmupSamplesRef.current.push({
         yaw: data.angles.yaw,
         pitch: data.angles.pitch,
+        roll: data.angles.roll,
         hRatio: data.gaze.hRatio,
         vRatio: data.gaze.vRatio,
+        dx: data.gaze.dx,
+        dy: data.gaze.dy,
+        transformMatrix: data.transformMatrix,
       });
       if (warmupSamplesRef.current.length >= 10) {
         const autoProfile = buildAutoBaselineProfile(warmupSamplesRef.current);
@@ -222,13 +244,12 @@ export const DiagnosticPlayground: React.FC = () => {
     }
 
     // Occlusion / Blink / Eye-scratch guard:
-    // If either eye is closed/occluded, freeze pose & gaze updates so scratching eyes doesn't spike flags.
+    // Freeze pose & gaze updates when both eyes are closed or severely occluded.
     if (
       !data.gaze ||
       !data.angles ||
       data.gaze.isBlinking ||
-      data.gaze.rightOpenness < 0.15 ||
-      data.gaze.leftOpenness < 0.15
+      (data.gaze.rightOpenness < 0.15 && data.gaze.leftOpenness < 0.15)
     ) {
       return;
     }
@@ -249,34 +270,51 @@ export const DiagnosticPlayground: React.FC = () => {
 
     const drift = driftTracker.getDrift();
 
-    // 3. LOOKING_DOWN: pitch below drift-compensated calibrated floor
-    const pitchFloor = cal.pitchMin + drift.driftPitch;
-    const isLookingDownRaw = data.angles.pitch < pitchFloor;
-
-    // 4. HEAD_OFF_SCREEN: combined head pose + roll-invariant iris screen-plane projection
-    const yawMin = cal.yawMin;
-    const yawMax = cal.yawMax;
-    const pitchMax = cal.pitchMax + drift.driftPitch;
-
-    let isHeadOffScreenRaw =
-      data.angles.yaw < yawMin || data.angles.yaw > yawMax || data.angles.pitch > pitchMax;
-
-    const { gx, gy } = computeCombinedGaze(
-      data.angles.yaw,
-      data.angles.pitch,
-      data.gaze.hRatio,
-      data.gaze.vRatio
+    // 3D VOR-compensated gaze projection onto normalized screen coordinates [0..1, 0..1]
+    const mapped = mapGazeToScreen(
+      {
+        yaw: data.angles.yaw,
+        pitch: data.angles.pitch,
+        roll: data.angles.roll,
+        hRatio: data.gaze.hRatio,
+        vRatio: data.gaze.vRatio,
+        dx: data.gaze.dx,
+        dy: data.gaze.dy,
+        transformMatrix: data.transformMatrix,
+      },
+      cal,
+      drift
     );
-    const mapped = mapGazeToScreen(gx, gy, cal, drift);
-    setGazePoint(mapped);
-    if (mapped.isOffScreen) {
-      isHeadOffScreenRaw = true;
-    }
+    setGazePoint({ x: mapped.x, y: mapped.y, isOffScreen: mapped.isOffScreen });
 
-    // Slowly adapt posture drift only when candidate is looking comfortably within screen bounds
+    // 3. LOOKING_DOWN: triggered by downward screen gaze OR pitch below calibrated floor
+    // (Downward gaze droops upper eyelids, so pitch remains a valuable secondary cue;
+    //  guard against firing when head is clearly pitched UP above neutral.)
+    const pitchFloor = cal.pitchMin + drift.driftPitch;
+    const isLookingDownRaw =
+      data.angles.pitch < pitchFloor ||
+      (mapped.y > LOOKING_DOWN_GAZE_THRESHOLD &&
+        data.angles.pitch < cal.neutralPitch + drift.driftPitch + 4);
+
+    // 4. HEAD_OFF_SCREEN:
+    // Primary trigger is the 3D VOR-compensated screen-plane gaze (mapped.isOffScreen).
+    // Tight head-yaw bounds are intentionally REMOVED so turning the head while fixating
+    // on the screen (VOR) does NOT falsely trigger HEAD_OFF_SCREEN, while iris-only
+    // glances off-screen ARE caught accurately.
+    // Wide anatomical ceilings (+-35 deg yaw, +28 deg pitch up) act only as a fallback
+    // when extreme head rotation occludes the eyes.
+    const yawFromNeutral = Math.abs(data.angles.yaw - cal.neutralYaw);
+    const pitchUpFromNeutral = data.angles.pitch - (cal.neutralPitch + drift.driftPitch);
+    const isExtremeHeadTurn =
+      yawFromNeutral > ANATOMICAL_YAW_LIMIT_DEG ||
+      pitchUpFromNeutral > ANATOMICAL_PITCH_UP_LIMIT_DEG;
+
+    const isHeadOffScreenRaw = mapped.isOffScreen || isExtremeHeadTurn;
+
+    // Slowly adapt posture drift only when gaze is comfortably inside the screen
     driftTracker.update(
-      gx,
-      gy,
+      mapped.rawX,
+      mapped.rawY,
       data.angles.pitch,
       cal,
       !isHeadOffScreenRaw && !isLookingDownRaw
@@ -396,7 +434,7 @@ export const DiagnosticPlayground: React.FC = () => {
             className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs transition flex items-center gap-2 shadow-lg shadow-sky-600/20"
           >
             <Compass className="w-4 h-4" />
-            {calibration ? 'Re-Calibrate Gaze' : 'Calibrate Gaze (5-Point)'}
+            {calibration ? 'Re-Calibrate Gaze' : 'Calibrate Gaze (9-Pt + VOR)'}
           </button>
         </div>
       </header>
@@ -457,6 +495,7 @@ export const DiagnosticPlayground: React.FC = () => {
         onComplete={handleCalibrationComplete}
         currentAngles={angles}
         currentGaze={gaze}
+        currentTransformMatrix={transformMatrix}
       />
 
       {/* Live Gaze Dot Overlay (visible after calibration) */}

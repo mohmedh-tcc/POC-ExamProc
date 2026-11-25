@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  CALIBRATION_STEPS,
+  CALIBRATION_STEPS_9PT_VOR,
+  CALIBRATION_TARGETS,
   CalibrationSample,
   CalibrationProfile,
   buildCalibrationProfile,
@@ -15,6 +16,7 @@ interface CalibrationModalProps {
   onComplete: (profile: CalibrationProfile) => void;
   currentAngles: EulerAngles | null;
   currentGaze: IrisGazeResult | null;
+  currentTransformMatrix?: number[];
 }
 
 export const CalibrationModal: React.FC<CalibrationModalProps> = ({
@@ -23,34 +25,32 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
   onComplete,
   currentAngles,
   currentGaze,
+  currentTransformMatrix,
 }) => {
   const [stepIndex, setStepIndex] = useState(0);
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [countdown, setCountdown] = useState(2);
+  const [remainingMs, setRemainingMs] = useState(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
   const samplesRef = useRef<CalibrationSample[]>([]);
 
-  // Keep onComplete in a ref so changes in parent render do not reset our countdown interval
+  // Keep onComplete in a ref so parent re-renders never reset our timer
   const onCompleteRef = useRef(onComplete);
   useEffect(() => {
     onCompleteRef.current = onComplete;
   }, [onComplete]);
 
-  const currentStep = CALIBRATION_STEPS[stepIndex];
-
-  // Position styles for target indicator
-  const targetPositions: Record<string, string> = {
-    'center': 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2',
-    'top-left': 'top-12 left-12',
-    'top-right': 'top-12 right-12',
-    'bottom-left': 'bottom-12 left-12',
-    'bottom-right': 'bottom-12 right-12',
-  };
+  const currentStep = CALIBRATION_STEPS_9PT_VOR[stepIndex];
+  const targetCoords = currentStep ? CALIBRATION_TARGETS[currentStep.point] : { x: 0.5, y: 0.5 };
+  const isVorStep =
+    currentStep?.point === 'vor-left' ||
+    currentStep?.point === 'vor-right' ||
+    currentStep?.point === 'vor-up' ||
+    currentStep?.point === 'vor-down';
 
   useEffect(() => {
     if (!isOpen) {
       setIsCalibrating(false);
       setStepIndex(0);
-      setCountdown(2);
+      setRemainingMs(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
       samplesRef.current = [];
     }
   }, [isOpen]);
@@ -63,62 +63,85 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
       samplesRef.current.push({
         yaw: currentAngles.yaw,
         pitch: currentAngles.pitch,
+        roll: currentAngles.roll,
         hRatio: currentGaze.hRatio,
         vRatio: currentGaze.vRatio,
-        point: CALIBRATION_STEPS[stepIndex]?.point,
+        dx: currentGaze.dx,
+        dy: currentGaze.dy,
+        transformMatrix: currentTransformMatrix,
+        point: CALIBRATION_STEPS_9PT_VOR[stepIndex]?.point,
       });
     }
-  }, [isCalibrating, currentAngles, currentGaze, stepIndex]);
+  }, [isCalibrating, currentAngles, currentGaze, currentTransformMatrix, stepIndex]);
 
-  // Rock-solid countdown and step progression timer
+  // Timer loop for step progression (100ms tick for accurate sub-second durations)
   useEffect(() => {
     if (!isCalibrating) return;
 
     let step = 0;
-    let timeRemaining = 2; // 2 seconds per point
+    let timeLeft = CALIBRATION_STEPS_9PT_VOR[0].durationMs;
     setStepIndex(0);
-    setCountdown(2);
+    setRemainingMs(timeLeft);
 
     const timer = setInterval(() => {
-      timeRemaining -= 1;
+      timeLeft -= 100;
 
-      if (timeRemaining <= 0) {
+      if (timeLeft <= 0) {
         step += 1;
-        if (step < CALIBRATION_STEPS.length) {
+        if (step < CALIBRATION_STEPS_9PT_VOR.length) {
           setStepIndex(step);
-          timeRemaining = 2;
-          setCountdown(2);
+          timeLeft = CALIBRATION_STEPS_9PT_VOR[step].durationMs;
+          setRemainingMs(timeLeft);
         } else {
-          // All 5 points finished!
           clearInterval(timer);
           setIsCalibrating(false);
-          setCountdown(0);
+          setRemainingMs(0);
           const profile = buildCalibrationProfile(samplesRef.current);
           onCompleteRef.current(profile);
         }
       } else {
-        setCountdown(timeRemaining);
+        setRemainingMs(timeLeft);
       }
-    }, 1000);
+    }, 100);
 
     return () => clearInterval(timer);
   }, [isCalibrating]);
 
   if (!isOpen) return null;
 
+  const countdownSec = Math.max(1, Math.ceil(remainingMs / 1000));
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
-      {/* Target visual dot that moves across screen */}
+      {/* Target visual dot positioned at exact normalized screen coordinates */}
       {isCalibrating && currentStep && (
-        <div className={`absolute ${targetPositions[currentStep.point]} flex flex-col items-center pointer-events-none transition-all duration-300`}>
+        <div
+          className="fixed -translate-x-1/2 -translate-y-1/2 flex flex-col items-center pointer-events-none transition-all duration-300 z-50"
+          style={{
+            left: `${targetCoords.x * 100}%`,
+            top: `${targetCoords.y * 100}%`,
+          }}
+        >
           <div className="relative flex items-center justify-center">
-            <span className="w-14 h-14 rounded-full bg-sky-500/30 animate-ping absolute" />
-            <span className="w-10 h-10 rounded-full bg-sky-400 border-2 border-white flex items-center justify-center text-slate-950 font-extrabold text-sm shadow-xl">
-              {countdown}s
+            <span
+              className={`w-14 h-14 rounded-full animate-ping absolute ${
+                isVorStep ? 'bg-amber-500/35' : 'bg-sky-500/30'
+              }`}
+            />
+            <span
+              className={`w-10 h-10 rounded-full border-2 border-white flex items-center justify-center text-slate-950 font-extrabold text-sm shadow-xl ${
+                isVorStep ? 'bg-amber-400' : 'bg-sky-400'
+              }`}
+            >
+              {countdownSec}s
             </span>
           </div>
-          <span className="text-xs font-semibold text-sky-300 mt-2 bg-slate-900/90 px-2.5 py-1 rounded-md border border-slate-700 shadow-md">
-            Look here
+          <span
+            className={`text-xs font-semibold mt-2 bg-slate-900/95 px-2.5 py-1 rounded-md border shadow-md whitespace-nowrap ${
+              isVorStep ? 'text-amber-300 border-amber-500/50' : 'text-sky-300 border-slate-700'
+            }`}
+          >
+            {isVorStep ? currentStep.label : 'Look here'}
           </span>
         </div>
       )}
@@ -130,25 +153,29 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
 
         <div>
           <h2 className="text-lg font-bold text-slate-100">
-            {isCalibrating ? `Step ${stepIndex + 1} of ${CALIBRATION_STEPS.length}` : 'Personal Gaze & Pose Calibration'}
+            {isCalibrating
+              ? `Step ${stepIndex + 1} of ${CALIBRATION_STEPS_9PT_VOR.length}`
+              : '9-Point + VOR Gaze Calibration'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
             {isCalibrating
               ? currentStep?.label
-              : 'Sit upright in your normal exam posture. The system will guide you through 5 calibration points (Center, Top-Left, Top-Right, Bottom-Left, Bottom-Right) for 2 seconds each to record your personal normal bounding baseline.'}
+              : 'Follow the dot across 9 screen points, then keep your eyes on the center dot while turning your head slightly left and right (VOR sweep) so the model separates head turns from off-screen glances.'}
           </p>
         </div>
 
         {isCalibrating && (
-          <div className="flex justify-center gap-2">
-            {CALIBRATION_STEPS.map((s, idx) => (
+          <div className="flex justify-center gap-1.5 flex-wrap">
+            {CALIBRATION_STEPS_9PT_VOR.map((s, idx) => (
               <div
                 key={s.point}
-                className={`w-3.5 h-3.5 rounded-full transition-all ${
+                className={`w-3 h-3 rounded-full transition-all ${
                   idx < stepIndex
                     ? 'bg-emerald-400'
                     : idx === stepIndex
-                    ? 'bg-sky-400 ring-2 ring-sky-400/50 scale-125'
+                    ? s.point.startsWith('vor')
+                      ? 'bg-amber-400 ring-2 ring-amber-400/50 scale-125'
+                      : 'bg-sky-400 ring-2 ring-sky-400/50 scale-125'
                     : 'bg-slate-800'
                 }`}
               />
@@ -169,12 +196,12 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
                 onClick={() => {
                   samplesRef.current = [];
                   setStepIndex(0);
-                  setCountdown(2);
+                  setRemainingMs(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
                   setIsCalibrating(true);
                 }}
                 className="px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-xs font-semibold text-slate-950 transition flex items-center gap-2 shadow-lg shadow-sky-500/20"
               >
-                Start 5-Point Calibration
+                Start 9-Point + VOR Calibration
               </button>
             </>
           ) : (
