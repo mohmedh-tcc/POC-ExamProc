@@ -1,12 +1,17 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { CameraPipeline, FaceDetectorEvent } from '../lib/camera';
-import { CalibrationProfile, CalibrationSample, buildCalibrationProfile } from '../lib/engine/calibrator';
+import { CameraPipeline, FaceMeshEvent, MouthMotionEvent } from '../lib/camera';
+import {
+  CalibrationProfile,
+  CalibrationSample,
+  buildAutoBaselineProfile,
+} from '../lib/engine/calibrator';
 import {
   SignalType,
   DebounceStateMachine,
   DebounceState,
 } from '../lib/engine/state-machine';
 import { LeakyBucketEngine, RiskLevel } from '../lib/engine/leaky-bucket';
+import { IrisGazeResult } from '../lib/math/iris-gaze';
 import { VideoFeed } from '../components/VideoFeed';
 import { Gauges } from '../components/Gauges';
 import { SignalStatusGrid } from '../components/SignalStatusGrid';
@@ -27,6 +32,7 @@ export const DiagnosticPlayground: React.FC = () => {
   const [calibration, setCalibration] = useState<CalibrationProfile | null>(null);
   const calibrationRef = useRef<CalibrationProfile | null>(null);
   calibrationRef.current = calibration;
+
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
   const [fastDevMode, setFastDevMode] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -36,6 +42,9 @@ export const DiagnosticPlayground: React.FC = () => {
   const [workerDelegate, setWorkerDelegate] = useState('CPU');
   const [faceCount, setFaceCount] = useState(0);
   const [angles, setAngles] = useState<{ pitch: number; yaw: number; roll: number } | null>(null);
+  const [transformMatrix, setTransformMatrix] = useState<number[] | undefined>(undefined);
+  const [gaze, setGaze] = useState<IrisGazeResult | null>(null);
+  const [mouth, setMouth] = useState<MouthMotionEvent | null>(null);
   const [keyPoints, setKeyPoints] = useState<Array<{ x: number; y: number; z: number }> | null>(null);
   const [showMesh, setShowMesh] = useState(false);
 
@@ -44,8 +53,8 @@ export const DiagnosticPlayground: React.FC = () => {
     faceAvg: 0,
     faceLast: 0,
     cpuDutyCyclePercent: 0,
-    faceIntervalMs: 667,
-    faceFps: 1.5,
+    faceIntervalMs: 200,
+    faceFps: 5,
     isDegraded: false,
   });
   const [jsHeapMb, setJsHeapMb] = useState<number | null>(null);
@@ -79,6 +88,7 @@ export const DiagnosticPlayground: React.FC = () => {
     EXTRA_FACE: new DebounceStateMachine('EXTRA_FACE'),
     HEAD_OFF_SCREEN: new DebounceStateMachine('HEAD_OFF_SCREEN'),
     LOOKING_DOWN: new DebounceStateMachine('LOOKING_DOWN'),
+    SPEAKING_VISUAL: new DebounceStateMachine('SPEAKING_VISUAL'),
     FROZEN_FEED: new DebounceStateMachine('FROZEN_FEED'),
     TAB_SWITCH: new DebounceStateMachine('TAB_SWITCH'),
     FULLSCREEN_EXIT: new DebounceStateMachine('FULLSCREEN_EXIT'),
@@ -93,6 +103,7 @@ export const DiagnosticPlayground: React.FC = () => {
     EXTRA_FACE: { type: 'EXTRA_FACE', state: 'IDLE', activeDurationMs: 0 },
     HEAD_OFF_SCREEN: { type: 'HEAD_OFF_SCREEN', state: 'IDLE', activeDurationMs: 0 },
     LOOKING_DOWN: { type: 'LOOKING_DOWN', state: 'IDLE', activeDurationMs: 0 },
+    SPEAKING_VISUAL: { type: 'SPEAKING_VISUAL', state: 'IDLE', activeDurationMs: 0 },
     FROZEN_FEED: { type: 'FROZEN_FEED', state: 'IDLE', activeDurationMs: 0 },
     TAB_SWITCH: { type: 'TAB_SWITCH', state: 'IDLE', activeDurationMs: 0 },
     FULLSCREEN_EXIT: { type: 'FULLSCREEN_EXIT', state: 'IDLE', activeDurationMs: 0 },
@@ -135,6 +146,7 @@ export const DiagnosticPlayground: React.FC = () => {
   useEffect(() => {
     stateMachines.current.LOOKING_DOWN.onsetMs = fastDevMode ? 1000 : 3000;
     stateMachines.current.HEAD_OFF_SCREEN.onsetMs = fastDevMode ? 1000 : 4000;
+    stateMachines.current.SPEAKING_VISUAL.onsetMs = fastDevMode ? 1200 : 2000;
   }, [fastDevMode]);
 
   // Browser events: TAB_SWITCH & FULLSCREEN_EXIT
@@ -168,7 +180,7 @@ export const DiagnosticPlayground: React.FC = () => {
     };
   }, [updateSignal]);
 
-  // Initialize Camera + BlazeFace FaceDetector Worker
+  // Initialize Camera + FaceLandmarker Worker (CPU WASM @ 5 Hz)
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -180,47 +192,63 @@ export const DiagnosticPlayground: React.FC = () => {
       onWorkerReady: (delegate) => {
         setWorkerDelegate(delegate);
       },
-      onFaceResult: (data: FaceDetectorEvent) => {
+      onFaceResult: (data: FaceMeshEvent) => {
         const now = Date.now();
         setFaceCount(data.faceCount);
-        setAngles({ pitch: data.pitchDeg, yaw: data.yawDeg, roll: 0 });
-        setKeyPoints(data.keypoints ? data.keypoints.map((k) => ({ x: k.x, y: k.y, z: 0 })) : null);
+        setAngles(data.angles);
+        setTransformMatrix(data.transformMatrix);
+        setGaze(data.gaze);
+        setMouth(data.mouth);
+        setKeyPoints(data.keyPoints);
         setPerfStats(pipeline.performance.getStats());
 
+        // 1. NO_FACE (at 4 Hz, 14 frames ~ 3.5s)
         noFaceHistory.current.push(data.faceCount === 0);
-        if (noFaceHistory.current.length > 6) noFaceHistory.current.shift();
+        if (noFaceHistory.current.length > 14) noFaceHistory.current.shift();
         const noFaceCount = noFaceHistory.current.filter(Boolean).length;
-        const noFaceActive = noFaceHistory.current.length >= 4 && noFaceCount / noFaceHistory.current.length >= 0.9;
+        const noFaceActive = noFaceHistory.current.length >= 8 && noFaceCount / noFaceHistory.current.length >= 0.9;
 
+        // 2. EXTRA_FACE
         extraFaceHistory.current.push(data.faceCount >= 2);
-        if (extraFaceHistory.current.length > 3) extraFaceHistory.current.shift();
+        if (extraFaceHistory.current.length > 5) extraFaceHistory.current.shift();
         const extraFaceCount = extraFaceHistory.current.filter(Boolean).length;
-        const extraFaceActive = extraFaceHistory.current.length >= 2 && extraFaceCount >= 2;
+        const extraFaceActive = extraFaceHistory.current.length >= 3 && extraFaceCount >= 2;
 
+        // 3. FROZEN_FEED
         const isFrozen = data.frameDiff < 0.5;
+
+        // 4. SPEAKING_VISUAL (lip oscillation without mic)
+        const isSpeakingVisual = Boolean(data.mouth?.isSpeaking);
 
         updateSignal('NO_FACE', noFaceActive, now);
         updateSignal('EXTRA_FACE', extraFaceActive, now);
         updateSignal('FROZEN_FEED', isFrozen, now);
+        updateSignal('SPEAKING_VISUAL', isSpeakingVisual, now);
 
+        if (data.faceCount === 0 || !data.angles) return;
+
+        // Auto-baseline warmup on first 10 valid frames
         let cal = calibrationRef.current;
-        if (!cal && data.faceCount === 1) {
+        if (!cal && data.faceCount === 1 && data.gaze) {
           warmupSamplesRef.current.push({
-            yaw: data.yawDeg,
-            pitch: data.pitchDeg,
-            hRatio: 0.5,
-            vRatio: 0.5,
+            yaw: data.angles.yaw,
+            pitch: data.angles.pitch,
+            roll: data.angles.roll,
+            hRatio: data.gaze.hRatio,
+            vRatio: data.gaze.vRatio,
+            dx: data.gaze.dx,
+            dy: data.gaze.dy,
+            transformMatrix: data.transformMatrix,
           });
-          if (warmupSamplesRef.current.length >= 6) {
-            const autoProfile = buildCalibrationProfile(warmupSamplesRef.current);
+          if (warmupSamplesRef.current.length >= 10) {
+            const autoProfile = buildAutoBaselineProfile(warmupSamplesRef.current);
             calibrationRef.current = autoProfile;
             setCalibration(autoProfile);
             cal = autoProfile;
           }
         }
 
-        if (data.faceCount === 0) return;
-
+        // 5. HEAD_OFF_SCREEN & LOOKING_DOWN from calibrated 3D head pose (immune to 2px iris noise)
         const neutralYaw = cal?.neutralYaw ?? 0;
         const neutralPitch = cal?.neutralPitch ?? 0;
         const yawMin = cal ? Math.max(cal.yawMin, neutralYaw - 14) : -14;
@@ -228,14 +256,17 @@ export const DiagnosticPlayground: React.FC = () => {
         const pitchFloor = cal ? Math.max(cal.pitchMin, neutralPitch - 10) : -10;
         const pitchMax = cal ? Math.min(cal.pitchMax, neutralPitch + 16) : 16;
 
-        const isHeadOffScreen = data.yawDeg < yawMin || data.yawDeg > yawMax || data.pitchDeg > pitchMax;
-        const isLookingDown = data.pitchDeg < pitchFloor;
+        const isHeadOffScreen =
+          data.angles.yaw < yawMin ||
+          data.angles.yaw > yawMax ||
+          data.angles.pitch > pitchMax;
+        const isLookingDown = data.angles.pitch < pitchFloor;
 
         updateSignal('HEAD_OFF_SCREEN', isHeadOffScreen, now);
         updateSignal('LOOKING_DOWN', isLookingDown, now);
       },
       onError: (err) => {
-        console.error('FaceDetector worker error:', err);
+        console.error('FaceLandmarker worker error:', err);
       },
     }).catch((err) => console.error('Failed to init pipeline:', err));
 
@@ -309,14 +340,14 @@ export const DiagnosticPlayground: React.FC = () => {
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center text-xs font-bold">
-              FD
+              FL
             </div>
             <div>
               <h1 className="text-sm font-semibold text-slate-100 leading-tight">
                 Exam proctor
               </h1>
               <p className="text-[11px] text-slate-400 leading-tight">
-                BlazeFace 1.5 Hz, 320x240 capture
+                FaceLandmarker {perfStats.faceFps} Hz, 480x360 capture
               </p>
             </div>
           </div>
@@ -384,7 +415,7 @@ export const DiagnosticPlayground: React.FC = () => {
               className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs transition flex items-center gap-1.5"
             >
               <Compass className="w-3.5 h-3.5" />
-              {calibration ? 'Recalibrate' : 'Calibrate'}
+              {calibration && !calibration.isAutoBaseline ? 'Recalibrate' : 'Calibrate'}
             </button>
           </div>
         </div>
@@ -415,7 +446,12 @@ export const DiagnosticPlayground: React.FC = () => {
               mainThreadLagMs={mainThreadLagMs}
             />
 
-            <Gauges angles={angles} calibration={calibration} />
+            <Gauges
+              angles={angles}
+              gaze={gaze}
+              mouth={mouth}
+              calibration={calibration}
+            />
           </div>
 
           <div className="lg:col-span-5 space-y-5">
@@ -453,19 +489,8 @@ export const DiagnosticPlayground: React.FC = () => {
         onClose={() => setIsCalibrationOpen(false)}
         onComplete={handleCalibrationComplete}
         currentAngles={angles}
-        currentGaze={{
-          hRatio: 0.5,
-          vRatio: 0.5,
-          isBlinking: false,
-          rightOpenness: 0.3,
-          leftOpenness: 0.3,
-          dx: 0,
-          dy: 0,
-          eyeYawRad: 0,
-          eyePitchRad: 0,
-          eyeVector: [0, 0, 1],
-          confidence: 1,
-        }}
+        currentGaze={gaze}
+        currentTransformMatrix={transformMatrix}
       />
     </div>
   );

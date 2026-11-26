@@ -3,6 +3,7 @@ export type SignalType =
   | 'EXTRA_FACE'
   | 'HEAD_OFF_SCREEN'
   | 'LOOKING_DOWN'
+  | 'SPEAKING_VISUAL'
   | 'FROZEN_FEED'
   | 'TAB_SWITCH'
   | 'FULLSCREEN_EXIT';
@@ -41,6 +42,12 @@ export const SIGNAL_DEFINITIONS: Record<SignalType, SignalDefinition> = {
     weight: 2,
     description: 'Head tilted down toward desk/lap (phone check)',
   },
+  SPEAKING_VISUAL: {
+    type: 'SPEAKING_VISUAL',
+    family: 'vision',
+    weight: 2,
+    description: 'Repeated lip movement detected without microphone',
+  },
   FROZEN_FEED: {
     type: 'FROZEN_FEED',
     family: 'vision',
@@ -77,6 +84,7 @@ export const DEFAULT_ONSET_MS: Record<SignalType, number> = {
   EXTRA_FACE: 0,
   HEAD_OFF_SCREEN: 4000,
   LOOKING_DOWN: 3000,
+  SPEAKING_VISUAL: 1500,
   FROZEN_FEED: 10000,
   TAB_SWITCH: 2000,
   FULLSCREEN_EXIT: 0,

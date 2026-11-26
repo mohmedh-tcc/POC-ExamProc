@@ -61,9 +61,12 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
       roll: currentAngles.roll,
       hRatio: currentGaze?.hRatio ?? 0.5,
       vRatio: currentGaze?.vRatio ?? 0.5,
+      dx: currentGaze?.dx,
+      dy: currentGaze?.dy,
+      transformMatrix: currentTransformMatrix,
       point: CALIBRATION_STEPS[stepIndex]?.point,
     });
-  }, [isCalibrating, currentAngles, currentGaze, stepIndex]);
+  }, [isCalibrating, currentAngles, currentGaze, currentTransformMatrix, stepIndex]);
 
   // Timer loop for step progression (100ms tick for accurate sub-second durations)
   useEffect(() => {
@@ -146,12 +149,12 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
           <h2 className="text-lg font-bold text-slate-100">
             {isCalibrating
               ? `Step ${stepIndex + 1} of ${CALIBRATION_STEPS.length}`
-              : '5-Point Head-Pose Calibration'}
+              : '5-point gaze & pose calibration'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
             {isCalibrating
               ? currentStep?.label
-              : 'Look directly at each of the 5 screen points (Center + 4 Corners) with natural head posture so the detector learns your exact screen-focus zone.'}
+              : 'Look directly at each of the 5 screen points (center and 4 corners) with natural head posture so the model learns your screen bounds.'}
           </p>
         </div>
 

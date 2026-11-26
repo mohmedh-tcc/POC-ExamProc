@@ -1,17 +1,28 @@
 import { PerformanceManager } from './performance';
+import { EulerAngles } from './math/transform-matrix';
+import { IrisGazeResult, NormalizedLandmark } from './math/iris-gaze';
 
-export interface FaceDetectorEvent {
+export interface MouthMotionEvent {
+  mar: number;
+  isSpeaking: boolean;
+  motionScore: number;
+}
+
+export interface FaceMeshEvent {
   faceCount: number;
-  yawDeg: number;
-  pitchDeg: number;
+  angles: EulerAngles | null;
+  rawAngles: EulerAngles | null;
+  transformMatrix?: number[];
+  gaze: IrisGazeResult | null;
+  mouth: MouthMotionEvent | null;
   frameDiff: number;
-  keypoints: Array<{ x: number; y: number }> | null;
+  keyPoints: NormalizedLandmark[] | null;
   latencyMs: number;
   timestamp: number;
 }
 
 export interface PipelineCallbacks {
-  onFaceResult?: (data: FaceDetectorEvent) => void;
+  onFaceResult?: (data: FaceMeshEvent) => void;
   onWorkerReady?: (delegate: string) => void;
   onError?: (error: string) => void;
 }
@@ -32,12 +43,12 @@ export class CameraPipeline {
     this.video = videoElement;
     this.callbacks = callbacks;
 
-    // Low-power webcam stream: 320x240 @ 10-15 fps
+    // Balanced webcam stream: 480x360 @ 15 fps for crisp lip & iris landmarks with low decode overhead
     this.stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        width: { ideal: 320 },
-        height: { ideal: 240 },
-        frameRate: { ideal: 10, max: 15 },
+        width: { ideal: 480 },
+        height: { ideal: 360 },
+        frameRate: { ideal: 15, max: 15 },
         facingMode: 'user',
       },
       audio: false,
@@ -47,7 +58,7 @@ export class CameraPipeline {
     await this.video.play();
 
     this.faceWorker = new Worker(
-      new URL('../workers/face-detector.worker.ts', import.meta.url),
+      new URL('../workers/face-mesh.worker.ts', import.meta.url),
       { type: 'module' }
     );
 
@@ -75,7 +86,7 @@ export class CameraPipeline {
     this.faceWorker.postMessage({
       type: 'INIT',
       wasmPath: '/wasm',
-      modelPath: '/models/blaze_face_short_range.tflite',
+      modelPath: '/models/face_landmarker.task',
     });
 
     this.isRunning = true;

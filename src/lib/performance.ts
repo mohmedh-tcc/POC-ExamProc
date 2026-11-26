@@ -3,8 +3,8 @@ export class PerformanceManager {
   private objectLatencies: number[] = [];
   private readonly maxWindow = 30;
 
-  // Face rate steps: 1.5 Hz (667ms) -> 1 Hz (1000ms) -> 0.5 Hz (2000ms)
-  private readonly faceRates = [667, 1000, 2000];
+  // Face rate steps: 4 Hz (250ms) -> 3 Hz (333ms) -> 2 Hz (500ms)
+  private readonly faceRates = [250, 333, 500];
   private faceRateIndex = 0;
 
   // Object interval steps: 2.5s (2500ms) -> 4.0s (4000ms) -> 6.0s (6000ms)

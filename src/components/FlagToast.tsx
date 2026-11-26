@@ -19,6 +19,7 @@ const LABELS: Record<SignalType, string> = {
   EXTRA_FACE: 'Extra person in frame',
   HEAD_OFF_SCREEN: 'Head turned off screen',
   LOOKING_DOWN: 'Looking down',
+  SPEAKING_VISUAL: 'Lip movement (speaking)',
   FROZEN_FEED: 'Frozen camera feed',
   TAB_SWITCH: 'Tab switch or focus lost',
   FULLSCREEN_EXIT: 'Exited fullscreen',

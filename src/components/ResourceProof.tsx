@@ -98,7 +98,7 @@ export const ResourceProof: React.FC<ResourceProofProps> = ({
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-slate-500 font-mono">
-        <span>1 worker thread, 0 WebGL contexts, 320x240 capture</span>
+        <span>1 worker thread, 0 WebGL contexts, 480x360 capture</span>
         <span>Duty = avg inference / {faceIntervalMs} ms interval</span>
       </div>
     </div>
