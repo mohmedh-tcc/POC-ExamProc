@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  CALIBRATION_STEPS_9PT_VOR,
+  CALIBRATION_STEPS,
   CALIBRATION_TARGETS,
   CalibrationSample,
   CalibrationProfile,
@@ -29,7 +29,7 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
 }) => {
   const [stepIndex, setStepIndex] = useState(0);
   const [isCalibrating, setIsCalibrating] = useState(false);
-  const [remainingMs, setRemainingMs] = useState(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
+  const [remainingMs, setRemainingMs] = useState(CALIBRATION_STEPS[0].durationMs);
   const samplesRef = useRef<CalibrationSample[]>([]);
 
   // Keep onComplete in a ref so parent re-renders never reset our timer
@@ -38,48 +38,39 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
     onCompleteRef.current = onComplete;
   }, [onComplete]);
 
-  const currentStep = CALIBRATION_STEPS_9PT_VOR[stepIndex];
+  const currentStep = CALIBRATION_STEPS[stepIndex];
   const targetCoords = currentStep ? CALIBRATION_TARGETS[currentStep.point] : { x: 0.5, y: 0.5 };
-  const isVorStep =
-    currentStep?.point === 'vor-left' ||
-    currentStep?.point === 'vor-right' ||
-    currentStep?.point === 'vor-up' ||
-    currentStep?.point === 'vor-down';
+  const isVorStep = false;
 
   useEffect(() => {
     if (!isOpen) {
       setIsCalibrating(false);
       setStepIndex(0);
-      setRemainingMs(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
+      setRemainingMs(CALIBRATION_STEPS[0].durationMs);
       samplesRef.current = [];
     }
   }, [isOpen]);
 
   // Frame sampling during calibration
   useEffect(() => {
-    if (!isCalibrating || !currentAngles || !currentGaze) return;
+    if (!isCalibrating || !currentAngles) return;
 
-    if (!currentGaze.isBlinking) {
-      samplesRef.current.push({
-        yaw: currentAngles.yaw,
-        pitch: currentAngles.pitch,
-        roll: currentAngles.roll,
-        hRatio: currentGaze.hRatio,
-        vRatio: currentGaze.vRatio,
-        dx: currentGaze.dx,
-        dy: currentGaze.dy,
-        transformMatrix: currentTransformMatrix,
-        point: CALIBRATION_STEPS_9PT_VOR[stepIndex]?.point,
-      });
-    }
-  }, [isCalibrating, currentAngles, currentGaze, currentTransformMatrix, stepIndex]);
+    samplesRef.current.push({
+      yaw: currentAngles.yaw,
+      pitch: currentAngles.pitch,
+      roll: currentAngles.roll,
+      hRatio: currentGaze?.hRatio ?? 0.5,
+      vRatio: currentGaze?.vRatio ?? 0.5,
+      point: CALIBRATION_STEPS[stepIndex]?.point,
+    });
+  }, [isCalibrating, currentAngles, currentGaze, stepIndex]);
 
   // Timer loop for step progression (100ms tick for accurate sub-second durations)
   useEffect(() => {
     if (!isCalibrating) return;
 
     let step = 0;
-    let timeLeft = CALIBRATION_STEPS_9PT_VOR[0].durationMs;
+    let timeLeft = CALIBRATION_STEPS[0].durationMs;
     setStepIndex(0);
     setRemainingMs(timeLeft);
 
@@ -88,9 +79,9 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
 
       if (timeLeft <= 0) {
         step += 1;
-        if (step < CALIBRATION_STEPS_9PT_VOR.length) {
+        if (step < CALIBRATION_STEPS.length) {
           setStepIndex(step);
-          timeLeft = CALIBRATION_STEPS_9PT_VOR[step].durationMs;
+          timeLeft = CALIBRATION_STEPS[step].durationMs;
           setRemainingMs(timeLeft);
         } else {
           clearInterval(timer);
@@ -154,19 +145,19 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
         <div>
           <h2 className="text-lg font-bold text-slate-100">
             {isCalibrating
-              ? `Step ${stepIndex + 1} of ${CALIBRATION_STEPS_9PT_VOR.length}`
-              : '9-Point + VOR Gaze Calibration'}
+              ? `Step ${stepIndex + 1} of ${CALIBRATION_STEPS.length}`
+              : '5-Point Head-Pose Calibration'}
           </h2>
           <p className="text-xs text-slate-400 mt-1">
             {isCalibrating
               ? currentStep?.label
-              : 'Follow the dot across 9 screen points, then keep your eyes on the center dot while turning your head slightly left and right (VOR sweep) so the model separates head turns from off-screen glances.'}
+              : 'Look directly at each of the 5 screen points (Center + 4 Corners) with natural head posture so the detector learns your exact screen-focus zone.'}
           </p>
         </div>
 
         {isCalibrating && (
           <div className="flex justify-center gap-1.5 flex-wrap">
-            {CALIBRATION_STEPS_9PT_VOR.map((s, idx) => (
+            {CALIBRATION_STEPS.map((s, idx) => (
               <div
                 key={s.point}
                 className={`w-3 h-3 rounded-full transition-all ${
@@ -196,12 +187,12 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
                 onClick={() => {
                   samplesRef.current = [];
                   setStepIndex(0);
-                  setRemainingMs(CALIBRATION_STEPS_9PT_VOR[0].durationMs);
+                  setRemainingMs(CALIBRATION_STEPS[0].durationMs);
                   setIsCalibrating(true);
                 }}
                 className="px-5 py-2 rounded-lg bg-sky-500 hover:bg-sky-400 text-xs font-semibold text-slate-950 transition flex items-center gap-2 shadow-lg shadow-sky-500/20"
               >
-                Start 9-Point + VOR Calibration
+                Start 5-Point Calibration
               </button>
             </>
           ) : (

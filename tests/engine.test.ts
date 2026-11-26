@@ -70,7 +70,7 @@ describe('Debounce State Machine', () => {
   });
 
   it('calculates sustained bonus (+0.25 * weight every 10s)', () => {
-    const sm = new DebounceStateMachine('PHONE'); // weight 5
+    const sm = new DebounceStateMachine('FROZEN_FEED', 0); // weight 5, 0ms onset for test
     let now = 1000;
 
     // Starts active

@@ -1,13 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { CameraPipeline, FaceDetectionEvent, ObjectDetectionEvent } from '../lib/camera';
-import { VADManager } from '../lib/vad';
-import {
-  CalibrationProfile,
-  CalibrationSample,
-  AdaptiveDriftTracker,
-  buildAutoBaselineProfile,
-  mapGazeToScreen,
-} from '../lib/engine/calibrator';
+import { CameraPipeline, FaceDetectorEvent } from '../lib/camera';
+import { CalibrationProfile, CalibrationSample, buildCalibrationProfile } from '../lib/engine/calibrator';
 import {
   SignalType,
   DebounceStateMachine,
@@ -21,93 +14,47 @@ import { LeakyBucketMeter } from '../components/LeakyBucketMeter';
 import { LatencyProfiler } from '../components/LatencyProfiler';
 import { CalibrationModal } from '../components/CalibrationModal';
 import { TestRunner } from './test-runner';
-import { EulerAngles } from '../lib/math/transform-matrix';
-import { IrisGazeResult, NormalizedLandmark } from '../lib/math/iris-gaze';
-import { Compass } from 'lucide-react';
-
-/**
- * Extended FaceDetectionEvent type supporting optional raw 4x4 transformation matrix
- * forwarded from the FaceLandmarker Web Worker.
- */
-type ExtendedFaceDetectionEvent = FaceDetectionEvent & {
-  transformMatrix?: number[] | Float32Array;
-};
-
-/**
- * Anatomical head-pose fallback limits (degrees from neutral).
- * Beyond +-35 deg yaw, the far eye is occluded by the nasal bridge and monocular iris
- * estimation degrades, so extreme head turns still flag HEAD_OFF_SCREEN as a safety guardrail.
- * Within +-35 deg, the 3D VOR-compensated gaze model decides on-screen vs. off-screen.
- */
-const ANATOMICAL_YAW_LIMIT_DEG = 35;
-const ANATOMICAL_PITCH_UP_LIMIT_DEG = 28;
-const LOOKING_DOWN_GAZE_THRESHOLD = 1.12; // Normalized screen y > 1.12 (below bottom bezel)
+import { Compass, Maximize2 } from 'lucide-react';
 
 export const DiagnosticPlayground: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const pipelineRef = useRef<CameraPipeline | null>(null);
-  const vadRef = useRef<VADManager | null>(null);
 
-  // Calibration & Dev Mode
   const [calibration, setCalibration] = useState<CalibrationProfile | null>(null);
   const calibrationRef = useRef<CalibrationProfile | null>(null);
   calibrationRef.current = calibration;
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
   const [fastDevMode, setFastDevMode] = useState(true);
-  const [gazePoint, setGazePoint] = useState<{ x: number; y: number; isOffScreen: boolean } | null>(null);
-  const driftTracker = useMemo(() => new AdaptiveDriftTracker(), []);
-  const warmupSamplesRef = useRef<CalibrationSample[]>([]);
-  const lastValidAnglesRef = useRef<EulerAngles | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const wasFullscreenRef = useRef(false);
 
-  // Workers Ready & Delegate status
-  const [workerStatus, setWorkerStatus] = useState({
-    faceReady: false,
-    faceDelegate: 'Initializing...',
-    objectReady: false,
-    objectDelegate: 'Initializing...',
-    vadReady: false,
-  });
-
-  // Detection states
+  const [workerDelegate, setWorkerDelegate] = useState('Initializing...');
   const [faceCount, setFaceCount] = useState(0);
-  const [angles, setAngles] = useState<EulerAngles | null>(null);
-  const [transformMatrix, setTransformMatrix] = useState<number[] | undefined>(undefined);
-  const [gaze, setGaze] = useState<IrisGazeResult | null>(null);
-  const [keyPoints, setKeyPoints] = useState<NormalizedLandmark[] | null>(null);
-  const [showMesh, setShowMesh] = useState(true);
+  const [angles, setAngles] = useState<{ pitch: number; yaw: number; roll: number } | null>(null);
+  const [keyPoints, setKeyPoints] = useState<Array<{ x: number; y: number; z: number }> | null>(null);
+  const [showMesh, setShowMesh] = useState(false); // Off by default to save GPU compositor
 
-  const [objectDetections, setObjectDetections] = useState<Array<{
-    categoryName: string;
-    score: number;
-    boundingBox?: any;
-  }>>([]);
-  const [hasPhone, setHasPhone] = useState(false);
-  const [personCount, setPersonCount] = useState(0);
-
-  // Performance stats
   const [perfStats, setPerfStats] = useState({
     faceP95: 0,
     objectP95: 0,
-    faceIntervalMs: 200,
-    objectIntervalMs: 2500,
-    faceFps: 5,
+    faceIntervalMs: 667,
+    objectIntervalMs: 0,
+    faceFps: 1.5,
     isDegraded: false,
   });
 
-  // Engines
   const leakyBucket = useMemo(() => new LeakyBucketEngine(), []);
   const [riskScore, setRiskScore] = useState(0);
   const [riskLevel, setRiskLevel] = useState<RiskLevel>('green');
 
-  // State Machines
   const stateMachines = useRef<Record<SignalType, DebounceStateMachine>>({
     NO_FACE: new DebounceStateMachine('NO_FACE'),
     EXTRA_FACE: new DebounceStateMachine('EXTRA_FACE'),
     HEAD_OFF_SCREEN: new DebounceStateMachine('HEAD_OFF_SCREEN'),
     LOOKING_DOWN: new DebounceStateMachine('LOOKING_DOWN'),
-    PHONE: new DebounceStateMachine('PHONE'),
-    EXTRA_PERSON: new DebounceStateMachine('EXTRA_PERSON'),
-    SPEECH: new DebounceStateMachine('SPEECH'),
+    FROZEN_FEED: new DebounceStateMachine('FROZEN_FEED'),
+    TAB_SWITCH: new DebounceStateMachine('TAB_SWITCH'),
+    FULLSCREEN_EXIT: new DebounceStateMachine('FULLSCREEN_EXIT'),
   });
 
   const [signalStatuses, setSignalStatuses] = useState<Record<SignalType, {
@@ -119,18 +66,15 @@ export const DiagnosticPlayground: React.FC = () => {
     EXTRA_FACE: { type: 'EXTRA_FACE', state: 'IDLE', activeDurationMs: 0 },
     HEAD_OFF_SCREEN: { type: 'HEAD_OFF_SCREEN', state: 'IDLE', activeDurationMs: 0 },
     LOOKING_DOWN: { type: 'LOOKING_DOWN', state: 'IDLE', activeDurationMs: 0 },
-    PHONE: { type: 'PHONE', state: 'IDLE', activeDurationMs: 0 },
-    EXTRA_PERSON: { type: 'EXTRA_PERSON', state: 'IDLE', activeDurationMs: 0 },
-    SPEECH: { type: 'SPEECH', state: 'IDLE', activeDurationMs: 0 },
+    FROZEN_FEED: { type: 'FROZEN_FEED', state: 'IDLE', activeDurationMs: 0 },
+    TAB_SWITCH: { type: 'TAB_SWITCH', state: 'IDLE', activeDurationMs: 0 },
+    FULLSCREEN_EXIT: { type: 'FULLSCREEN_EXIT', state: 'IDLE', activeDurationMs: 0 },
   });
 
-  // Rolling history for slow object detector and face count
-  const objectPhoneHistory = useRef<boolean[]>([]);
-  const objectPersonHistory = useRef<number[]>([]);
   const noFaceHistory = useRef<boolean[]>([]);
   const extraFaceHistory = useRef<boolean[]>([]);
+  const warmupSamplesRef = useRef<CalibrationSample[]>([]);
 
-  // Active signals set for test runner
   const activeSignalsSet = useMemo(() => {
     const s = new Set<SignalType>();
     for (const [k, v] of Object.entries(signalStatuses) as [SignalType, typeof signalStatuses[SignalType]][]) {
@@ -139,217 +83,7 @@ export const DiagnosticPlayground: React.FC = () => {
     return s;
   }, [signalStatuses]);
 
-  // Initialize Camera & VAD
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const pipeline = new CameraPipeline();
-    pipelineRef.current = pipeline;
-
-    pipeline.init(video, {
-      onWorkerReady: (workerName, delegate) => {
-        setWorkerStatus((prev) => ({
-          ...prev,
-          [`${workerName}Ready`]: true,
-          [`${workerName}Delegate`]: delegate,
-        }));
-      },
-      onFaceResult: (data: ExtendedFaceDetectionEvent) => {
-        setFaceCount(data.faceCount);
-        setAngles(data.angles);
-        setTransformMatrix(data.transformMatrix);
-        setGaze(data.gaze);
-        setKeyPoints(data.keyPoints);
-
-        // Update performance stats
-        setPerfStats(pipeline.performance.getStats());
-
-        // Update face detection conditions
-        handleFaceSignals(data);
-      },
-      onObjectResult: (data: ObjectDetectionEvent) => {
-        setHasPhone(data.hasPhone);
-        setPersonCount(data.personCount);
-        setObjectDetections(data.detections);
-
-        setPerfStats(pipeline.performance.getStats());
-
-        handleObjectSignals(data);
-      },
-      onError: (workerName, err) => {
-        console.error(`Worker error (${workerName}):`, err);
-      },
-    }).catch((err) => console.error('Failed to init pipeline:', err));
-
-    // Initialize VAD
-    const vad = new VADManager();
-    vadRef.current = vad;
-    vad.init((isSpeechTriggered) => {
-      handleSpeechSignal(isSpeechTriggered);
-    }).then(() => {
-      setWorkerStatus((prev) => ({ ...prev, vadReady: true }));
-    }).catch((err) => console.error('Failed to init VAD:', err));
-
-    return () => {
-      pipeline.stop();
-      vad.destroy();
-    };
-  }, []);
-
-  // Sync Fast Dev Mode (1s onset) vs Exam Mode (3s/4s onset)
-  useEffect(() => {
-    stateMachines.current.LOOKING_DOWN.onsetMs = fastDevMode ? 1000 : 3000;
-    stateMachines.current.HEAD_OFF_SCREEN.onsetMs = fastDevMode ? 1000 : 4000;
-  }, [fastDevMode]);
-
-  // Evaluates Face Signals (NO_FACE, EXTRA_FACE, HEAD_OFF_SCREEN, LOOKING_DOWN)
-  const handleFaceSignals = (data: ExtendedFaceDetectionEvent) => {
-    const now = Date.now();
-
-    // 1. NO_FACE: no face in 90% of samples for 4s (at 5Hz = 20 samples)
-    noFaceHistory.current.push(data.faceCount === 0);
-    if (noFaceHistory.current.length > 20) noFaceHistory.current.shift();
-    const noFaceCount = noFaceHistory.current.filter(Boolean).length;
-    const noFaceActive = noFaceHistory.current.length >= 15 && (noFaceCount / noFaceHistory.current.length) >= 0.9;
-
-    // 2. EXTRA_FACE: >= 2 faces on >= 2 of 3 consecutive samples for 2s (at 5Hz = 10 samples)
-    extraFaceHistory.current.push(data.faceCount >= 2);
-    if (extraFaceHistory.current.length > 10) extraFaceHistory.current.shift();
-    const extraFaceCount = extraFaceHistory.current.filter(Boolean).length;
-    const extraFaceActive = extraFaceHistory.current.length >= 6 && extraFaceCount >= 4;
-
-    updateSignal('NO_FACE', noFaceActive, now);
-    updateSignal('EXTRA_FACE', extraFaceActive, now);
-
-    // Auto-baseline warmup on first 10 valid frames if not manually calibrated yet
-    let cal = calibrationRef.current;
-    if (!cal && data.faceCount === 1 && data.angles && data.gaze && !data.gaze.isBlinking) {
-      warmupSamplesRef.current.push({
-        yaw: data.angles.yaw,
-        pitch: data.angles.pitch,
-        roll: data.angles.roll,
-        hRatio: data.gaze.hRatio,
-        vRatio: data.gaze.vRatio,
-        dx: data.gaze.dx,
-        dy: data.gaze.dy,
-        transformMatrix: data.transformMatrix,
-      });
-      if (warmupSamplesRef.current.length >= 10) {
-        const autoProfile = buildAutoBaselineProfile(warmupSamplesRef.current);
-        calibrationRef.current = autoProfile;
-        setCalibration(autoProfile);
-        cal = autoProfile;
-      }
-    }
-
-    // Occlusion / Blink / Eye-scratch guard:
-    // Freeze pose & gaze updates when both eyes are closed or severely occluded.
-    if (
-      !data.gaze ||
-      !data.angles ||
-      data.gaze.isBlinking ||
-      (data.gaze.rightOpenness < 0.15 && data.gaze.leftOpenness < 0.15)
-    ) {
-      return;
-    }
-
-    // Outlier spike guard: reject impossible single-frame >25 deg jumps (e.g. hand crossing face)
-    if (lastValidAnglesRef.current) {
-      const dYaw = Math.abs(data.angles.yaw - lastValidAnglesRef.current.yaw);
-      const dPitch = Math.abs(data.angles.pitch - lastValidAnglesRef.current.pitch);
-      if (dYaw > 25 || dPitch > 25) {
-        lastValidAnglesRef.current = data.angles;
-        return;
-      }
-    }
-    lastValidAnglesRef.current = data.angles;
-
-    // Wait until warmup or manual calibration is ready
-    if (!cal) return;
-
-    const drift = driftTracker.getDrift();
-
-    // 3D VOR-compensated gaze projection onto normalized screen coordinates [0..1, 0..1]
-    const mapped = mapGazeToScreen(
-      {
-        yaw: data.angles.yaw,
-        pitch: data.angles.pitch,
-        roll: data.angles.roll,
-        hRatio: data.gaze.hRatio,
-        vRatio: data.gaze.vRatio,
-        dx: data.gaze.dx,
-        dy: data.gaze.dy,
-        transformMatrix: data.transformMatrix,
-      },
-      cal,
-      drift
-    );
-    setGazePoint({ x: mapped.x, y: mapped.y, isOffScreen: mapped.isOffScreen });
-
-    // 3. LOOKING_DOWN: triggered by downward screen gaze OR pitch below calibrated floor
-    // (Downward gaze droops upper eyelids, so pitch remains a valuable secondary cue;
-    //  guard against firing when head is clearly pitched UP above neutral.)
-    const pitchFloor = cal.pitchMin + drift.driftPitch;
-    const isLookingDownRaw =
-      data.angles.pitch < pitchFloor ||
-      (mapped.y > LOOKING_DOWN_GAZE_THRESHOLD &&
-        data.angles.pitch < cal.neutralPitch + drift.driftPitch + 4);
-
-    // 4. HEAD_OFF_SCREEN:
-    // Primary trigger is the 3D VOR-compensated screen-plane gaze (mapped.isOffScreen).
-    // Tight head-yaw bounds are intentionally REMOVED so turning the head while fixating
-    // on the screen (VOR) does NOT falsely trigger HEAD_OFF_SCREEN, while iris-only
-    // glances off-screen ARE caught accurately.
-    // Wide anatomical ceilings (+-35 deg yaw, +28 deg pitch up) act only as a fallback
-    // when extreme head rotation occludes the eyes.
-    const yawFromNeutral = Math.abs(data.angles.yaw - cal.neutralYaw);
-    const pitchUpFromNeutral = data.angles.pitch - (cal.neutralPitch + drift.driftPitch);
-    const isExtremeHeadTurn =
-      yawFromNeutral > ANATOMICAL_YAW_LIMIT_DEG ||
-      pitchUpFromNeutral > ANATOMICAL_PITCH_UP_LIMIT_DEG;
-
-    const isHeadOffScreenRaw = mapped.isOffScreen || isExtremeHeadTurn;
-
-    // Slowly adapt posture drift only when gaze is comfortably inside the screen
-    driftTracker.update(
-      mapped.rawX,
-      mapped.rawY,
-      data.angles.pitch,
-      cal,
-      !isHeadOffScreenRaw && !isLookingDownRaw
-    );
-
-    updateSignal('LOOKING_DOWN', isLookingDownRaw, now);
-    updateSignal('HEAD_OFF_SCREEN', isHeadOffScreenRaw, now);
-  };
-
-  // Evaluates Object Signals (PHONE, EXTRA_PERSON)
-  const handleObjectSignals = (data: ObjectDetectionEvent) => {
-    const now = Date.now();
-
-    // PHONE: detected in >= 2 of last 3 samples
-    objectPhoneHistory.current.push(data.hasPhone);
-    if (objectPhoneHistory.current.length > 3) objectPhoneHistory.current.shift();
-    const phoneCount = objectPhoneHistory.current.filter(Boolean).length;
-    const phoneActive = objectPhoneHistory.current.length >= 2 && phoneCount >= 2;
-
-    // EXTRA_PERSON: person count > 1 in >= 2 of last 3 samples
-    objectPersonHistory.current.push(data.personCount);
-    if (objectPersonHistory.current.length > 3) objectPersonHistory.current.shift();
-    const extraPersonCount = objectPersonHistory.current.filter((c) => c > 1).length;
-    const extraPersonActive = objectPersonHistory.current.length >= 2 && extraPersonCount >= 2;
-
-    updateSignal('PHONE', phoneActive, now);
-    updateSignal('EXTRA_PERSON', extraPersonActive, now);
-  };
-
-  const handleSpeechSignal = (isSpeechTriggered: boolean) => {
-    const now = Date.now();
-    updateSignal('SPEECH', isSpeechTriggered, now);
-  };
-
-  const updateSignal = (type: SignalType, conditionActive: boolean, now: number) => {
+  const updateSignal = useCallback((type: SignalType, conditionActive: boolean, now: number) => {
     const sm = stateMachines.current[type];
     const res = sm.update(conditionActive, now);
 
@@ -369,54 +103,174 @@ export const DiagnosticPlayground: React.FC = () => {
         activeDurationMs: res.activeDurationMs,
       },
     }));
-  };
+  }, [leakyBucket]);
 
-  // 1-second interval to decay leaky bucket and refresh UI scores
+  // Sync Fast Dev Mode (1s onset) vs Exam Mode (3s/4s onset)
+  useEffect(() => {
+    stateMachines.current.LOOKING_DOWN.onsetMs = fastDevMode ? 1000 : 3000;
+    stateMachines.current.HEAD_OFF_SCREEN.onsetMs = fastDevMode ? 1000 : 4000;
+  }, [fastDevMode]);
+
+  // Browser events: TAB_SWITCH (visibilitychange / blur) & FULLSCREEN_EXIT (Fullscreen API)
+  useEffect(() => {
+    const checkFocus = () => {
+      const lostFocus = document.hidden || !document.hasFocus();
+      updateSignal('TAB_SWITCH', lostFocus, Date.now());
+    };
+
+    const handleFullscreenChange = () => {
+      const active = Boolean(document.fullscreenElement);
+      setIsFullscreen(active);
+      if (active) {
+        wasFullscreenRef.current = true;
+        updateSignal('FULLSCREEN_EXIT', false, Date.now());
+      } else if (wasFullscreenRef.current) {
+        updateSignal('FULLSCREEN_EXIT', true, Date.now());
+      }
+    };
+
+    document.addEventListener('visibilitychange', checkFocus);
+    window.addEventListener('blur', checkFocus);
+    window.addEventListener('focus', checkFocus);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', checkFocus);
+      window.removeEventListener('blur', checkFocus);
+      window.removeEventListener('focus', checkFocus);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [updateSignal]);
+
+  // Initialize Camera + BlazeFace FaceDetector Worker
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const pipeline = new CameraPipeline();
+    pipelineRef.current = pipeline;
+
+    pipeline.init(video, {
+      onWorkerReady: (delegate) => {
+        setWorkerDelegate(delegate);
+      },
+      onFaceResult: (data: FaceDetectorEvent) => {
+        const now = Date.now();
+        setFaceCount(data.faceCount);
+        setAngles({ pitch: data.pitchDeg, yaw: data.yawDeg, roll: 0 });
+        setKeyPoints(data.keypoints ? data.keypoints.map((k) => ({ x: k.x, y: k.y, z: 0 })) : null);
+        setPerfStats(pipeline.performance.getStats());
+
+        // 1. NO_FACE (at 1.5 Hz, 6 samples ~ 4s)
+        noFaceHistory.current.push(data.faceCount === 0);
+        if (noFaceHistory.current.length > 6) noFaceHistory.current.shift();
+        const noFaceCount = noFaceHistory.current.filter(Boolean).length;
+        const noFaceActive = noFaceHistory.current.length >= 4 && noFaceCount / noFaceHistory.current.length >= 0.9;
+
+        // 2. EXTRA_FACE (>= 2 faces in >= 2 of last 3 samples)
+        extraFaceHistory.current.push(data.faceCount >= 2);
+        if (extraFaceHistory.current.length > 3) extraFaceHistory.current.shift();
+        const extraFaceCount = extraFaceHistory.current.filter(Boolean).length;
+        const extraFaceActive = extraFaceHistory.current.length >= 2 && extraFaceCount >= 2;
+
+        // 3. FROZEN_FEED
+        const isFrozen = data.frameDiff < 0.5;
+
+        updateSignal('NO_FACE', noFaceActive, now);
+        updateSignal('EXTRA_FACE', extraFaceActive, now);
+        updateSignal('FROZEN_FEED', isFrozen, now);
+
+        // Auto-baseline warmup on first 6 valid frames
+        let cal = calibrationRef.current;
+        if (!cal && data.faceCount === 1) {
+          warmupSamplesRef.current.push({
+            yaw: data.yawDeg,
+            pitch: data.pitchDeg,
+            hRatio: 0.5,
+            vRatio: 0.5,
+          });
+          if (warmupSamplesRef.current.length >= 6) {
+            const autoProfile = buildCalibrationProfile(warmupSamplesRef.current);
+            calibrationRef.current = autoProfile;
+            setCalibration(autoProfile);
+            cal = autoProfile;
+          }
+        }
+
+        if (data.faceCount === 0) return;
+
+        // 4. HEAD_OFF_SCREEN & LOOKING_DOWN from BlazeFace 6-keypoint coarse pose
+        // Enforce tight lab-exam focus bounds around neutral (max +-14 deg yaw, -10 deg pitch down)
+        const neutralYaw = cal?.neutralYaw ?? 0;
+        const neutralPitch = cal?.neutralPitch ?? 0;
+        const yawMin = cal ? Math.max(cal.yawMin, neutralYaw - 14) : -14;
+        const yawMax = cal ? Math.min(cal.yawMax, neutralYaw + 14) : 14;
+        const pitchFloor = cal ? Math.max(cal.pitchMin, neutralPitch - 10) : -10;
+        const pitchMax = cal ? Math.min(cal.pitchMax, neutralPitch + 16) : 16;
+
+        const isHeadOffScreen = data.yawDeg < yawMin || data.yawDeg > yawMax || data.pitchDeg > pitchMax;
+        const isLookingDown = data.pitchDeg < pitchFloor;
+
+        updateSignal('HEAD_OFF_SCREEN', isHeadOffScreen, now);
+        updateSignal('LOOKING_DOWN', isLookingDown, now);
+      },
+      onError: (err) => {
+        console.error('FaceDetector Worker error:', err);
+      },
+    }).catch((err) => console.error('Failed to init pipeline:', err));
+
+    return () => {
+      pipeline.stop();
+    };
+  }, [updateSignal]);
+
+  // Decay leaky bucket every 500ms & poll tab focus
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
-      const current = leakyBucket.getScore(now);
-      const level = leakyBucket.getLevel(now);
-      setRiskScore(current);
-      setRiskLevel(level);
-
-      // Also trigger VAD rolling evaluation
-      if (vadRef.current) {
-        const vadStatus = vadRef.current.evaluateRollingSpeech(now);
-        updateSignal('SPEECH', vadStatus.isTriggered, now);
-      }
+      setRiskScore(leakyBucket.getScore(now));
+      setRiskLevel(leakyBucket.getLevel(now));
+      const lostFocus = document.hidden || !document.hasFocus();
+      updateSignal('TAB_SWITCH', lostFocus, now);
     }, 500);
 
     return () => clearInterval(interval);
-  }, [leakyBucket]);
+  }, [leakyBucket, updateSignal]);
 
   const handleCalibrationComplete = useCallback((profile: CalibrationProfile) => {
     calibrationRef.current = profile;
     setCalibration(profile);
-    driftTracker.reset();
     stateMachines.current.LOOKING_DOWN.reset();
     stateMachines.current.HEAD_OFF_SCREEN.reset();
     setIsCalibrationOpen(false);
-    console.log('Calibration Profile saved:', profile);
-  }, [driftTracker]);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    if (!document.fullscreenElement) {
+      await document.documentElement.requestFullscreen();
+    } else {
+      await document.exitFullscreen();
+    }
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
-      {/* Header bar */}
       <header className="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-slate-800 gap-4">
         <div>
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-400 flex items-center justify-center font-bold">
-              v2
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-400 flex items-center justify-center font-bold">
+              FD
             </div>
-            <h1 className="text-xl font-bold text-slate-100">Remote Exam Proctor POC — Phase 0</h1>
+            <h1 className="text-xl font-bold text-slate-100">
+              Lab Exam Proctor POC — Lightweight FaceDetector
+            </h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Edge-first detection testbench: FaceLandmarker (5 Hz), ObjectDetector (2.5s), Silero VAD (Audio)
+            BlazeFace 6-Keypoint (1.5 Hz CPU WASM) • 320×240 Capture • Fullscreen &amp; Tab-Switch API
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             onClick={() => setFastDevMode((v) => !v)}
             className={`px-3 py-2 rounded-lg text-xs font-medium border transition ${
@@ -424,9 +278,20 @@ export const DiagnosticPlayground: React.FC = () => {
                 ? 'bg-amber-500/20 border-amber-500/50 text-amber-300'
                 : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
             }`}
-            title="Toggle between 1s Fast Dev onset and 3-4s Exam Mode onset"
           >
             {fastDevMode ? '⚡ Fast Dev (1s)' : '🛡️ Exam Mode (3-4s)'}
+          </button>
+
+          <button
+            onClick={toggleFullscreen}
+            className={`px-3 py-2 rounded-lg text-xs font-medium border transition flex items-center gap-1.5 ${
+              isFullscreen
+                ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+            }`}
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            {isFullscreen ? 'Fullscreen Active' : 'Enter Fullscreen'}
           </button>
 
           <button
@@ -434,43 +299,36 @@ export const DiagnosticPlayground: React.FC = () => {
             className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-xs transition flex items-center gap-2 shadow-lg shadow-sky-600/20"
           >
             <Compass className="w-4 h-4" />
-            {calibration ? 'Re-Calibrate Gaze' : 'Calibrate Gaze (9-Pt + VOR)'}
+            {calibration ? 'Re-Calibrate Pose' : 'Calibrate Pose (5-Point)'}
           </button>
         </div>
       </header>
 
-      {/* Main Grid Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Video Feed & Gauges (7 cols) */}
         <div className="lg:col-span-7 space-y-6">
           <VideoFeed
             videoRef={videoRef}
             keyPoints={keyPoints}
-            objectDetections={objectDetections}
+            objectDetections={[]}
             showMesh={showMesh}
             onToggleMesh={() => setShowMesh(!showMesh)}
             faceCount={faceCount}
           />
 
-          <Gauges
-            angles={angles}
-            gaze={gaze}
-            calibration={calibration}
-          />
+          <Gauges angles={angles} gaze={null} calibration={calibration} />
 
           <LatencyProfiler
             faceP95={perfStats.faceP95}
-            objectP95={perfStats.objectP95}
+            objectP95={0}
             faceIntervalMs={perfStats.faceIntervalMs}
-            objectIntervalMs={perfStats.objectIntervalMs}
+            objectIntervalMs={0}
             faceFps={perfStats.faceFps}
             isDegraded={perfStats.isDegraded}
-            faceDelegate={workerStatus.faceDelegate}
-            objectDelegate={workerStatus.objectDelegate}
+            faceDelegate={workerDelegate}
+            objectDelegate="DISABLED"
           />
         </div>
 
-        {/* Right Column: Leaky Bucket & Signal State Machines (5 cols) */}
         <div className="lg:col-span-5 space-y-6">
           <LeakyBucketMeter
             score={riskScore}
@@ -488,32 +346,25 @@ export const DiagnosticPlayground: React.FC = () => {
         </div>
       </div>
 
-      {/* Calibration Modal */}
       <CalibrationModal
         isOpen={isCalibrationOpen}
         onClose={() => setIsCalibrationOpen(false)}
         onComplete={handleCalibrationComplete}
         currentAngles={angles}
-        currentGaze={gaze}
-        currentTransformMatrix={transformMatrix}
+        currentGaze={{
+          hRatio: 0.5,
+          vRatio: 0.5,
+          isBlinking: false,
+          rightOpenness: 0.3,
+          leftOpenness: 0.3,
+          dx: 0,
+          dy: 0,
+          eyeYawRad: 0,
+          eyePitchRad: 0,
+          eyeVector: [0, 0, 1],
+          confidence: 1,
+        }}
       />
-
-      {/* Live Gaze Dot Overlay (visible after calibration) */}
-      {gazePoint && !isCalibrationOpen && (
-        <div
-          className="fixed pointer-events-none z-40 transition-all duration-75 -translate-x-1/2 -translate-y-1/2"
-          style={{
-            left: `${Math.max(2, Math.min(98, gazePoint.x * 100))}%`,
-            top: `${Math.max(2, Math.min(98, gazePoint.y * 100))}%`,
-          }}
-        >
-          <div
-            className={`w-4 h-4 rounded-full border-2 border-white shadow-lg ${
-              gazePoint.isOffScreen ? 'bg-rose-500 scale-125 animate-pulse' : 'bg-teal-400/80'
-            }`}
-          />
-        </div>
-      )}
     </div>
   );
 };

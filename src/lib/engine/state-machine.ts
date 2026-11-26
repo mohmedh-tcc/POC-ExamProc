@@ -3,9 +3,9 @@ export type SignalType =
   | 'EXTRA_FACE'
   | 'HEAD_OFF_SCREEN'
   | 'LOOKING_DOWN'
-  | 'PHONE'
-  | 'EXTRA_PERSON'
-  | 'SPEECH';
+  | 'FROZEN_FEED'
+  | 'TAB_SWITCH'
+  | 'FULLSCREEN_EXIT';
 
 export type SignalFamily = 'vision' | 'audio' | 'browser';
 
@@ -27,37 +27,37 @@ export const SIGNAL_DEFINITIONS: Record<SignalType, SignalDefinition> = {
     type: 'EXTRA_FACE',
     family: 'vision',
     weight: 4,
-    description: 'Second face detected in frame',
+    description: 'Extra person / second face detected in frame',
   },
   HEAD_OFF_SCREEN: {
     type: 'HEAD_OFF_SCREEN',
     family: 'vision',
     weight: 1,
-    description: 'Head orientation or gaze directed away from screen',
+    description: 'Head turned away from screen (neighbor peek)',
   },
   LOOKING_DOWN: {
     type: 'LOOKING_DOWN',
     family: 'vision',
     weight: 2,
-    description: 'Gaze or head pitch tilted down toward desk/lap',
+    description: 'Head tilted down toward desk/lap (phone check)',
   },
-  PHONE: {
-    type: 'PHONE',
+  FROZEN_FEED: {
+    type: 'FROZEN_FEED',
     family: 'vision',
     weight: 5,
-    description: 'Cell phone or handheld mobile device detected',
+    description: 'Camera feed frozen or virtual loop detected',
   },
-  EXTRA_PERSON: {
-    type: 'EXTRA_PERSON',
-    family: 'vision',
+  TAB_SWITCH: {
+    type: 'TAB_SWITCH',
+    family: 'browser',
     weight: 3,
-    description: 'Additional person visible in camera view',
+    description: 'Browser tab hidden or window focus lost > 2s',
   },
-  SPEECH: {
-    type: 'SPEECH',
-    family: 'audio',
-    weight: 2,
-    description: 'Voice speech detected for >= 8s in last 60s',
+  FULLSCREEN_EXIT: {
+    type: 'FULLSCREEN_EXIT',
+    family: 'browser',
+    weight: 3,
+    description: 'Exited browser fullscreen mode',
   },
 };
 
@@ -77,9 +77,9 @@ export const DEFAULT_ONSET_MS: Record<SignalType, number> = {
   EXTRA_FACE: 0,
   HEAD_OFF_SCREEN: 4000,
   LOOKING_DOWN: 3000,
-  PHONE: 0,
-  EXTRA_PERSON: 0,
-  SPEECH: 0,
+  FROZEN_FEED: 10000,
+  TAB_SWITCH: 2000,
+  FULLSCREEN_EXIT: 0,
 };
 
 export class DebounceStateMachine {

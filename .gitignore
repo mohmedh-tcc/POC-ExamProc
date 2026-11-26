@@ -33,6 +33,11 @@ dist-ssr
 .env.local
 .env.*.local
 
+# Python virtual environment
+.venv/
+__pycache__/
+*.py[cod]
+
 # Large / generated model binaries and wasm files
 # (Can be repopulated anytime via `bun run download:models`)
 public/wasm/

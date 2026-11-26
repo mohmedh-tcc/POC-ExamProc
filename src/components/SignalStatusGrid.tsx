@@ -1,6 +1,6 @@
 import React from 'react';
 import { SignalType, DebounceState, SIGNAL_DEFINITIONS } from '../lib/engine/state-machine';
-import { AlertTriangle, UserX, Users, EyeOff, ArrowDown, Smartphone, Mic } from 'lucide-react';
+import { AlertTriangle, UserX, Users, EyeOff, ArrowDown, VideoOff, AppWindow, Maximize2 } from 'lucide-react';
 
 interface SignalStatusItem {
   type: SignalType;
@@ -17,9 +17,9 @@ const ICONS: Record<SignalType, React.ReactNode> = {
   EXTRA_FACE: <Users className="w-4 h-4 text-amber-400" />,
   HEAD_OFF_SCREEN: <EyeOff className="w-4 h-4 text-sky-400" />,
   LOOKING_DOWN: <ArrowDown className="w-4 h-4 text-indigo-400" />,
-  PHONE: <Smartphone className="w-4 h-4 text-red-500" />,
-  EXTRA_PERSON: <Users className="w-4 h-4 text-purple-400" />,
-  SPEECH: <Mic className="w-4 h-4 text-emerald-400" />,
+  FROZEN_FEED: <VideoOff className="w-4 h-4 text-red-500" />,
+  TAB_SWITCH: <AppWindow className="w-4 h-4 text-purple-400" />,
+  FULLSCREEN_EXIT: <Maximize2 className="w-4 h-4 text-orange-400" />,
 };
 
 export const SignalStatusGrid: React.FC<SignalStatusGridProps> = ({ signals }) => {

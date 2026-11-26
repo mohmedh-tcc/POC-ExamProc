@@ -40,10 +40,10 @@ export const TEST_SCENARIOS: TestScenario[] = [
     durationSec: 5,
   },
   {
-    id: 'phone-detected',
-    title: 'Cell Phone in Camera View',
-    instruction: 'Hold up a smartphone in front of the camera for 5 seconds.',
-    expectedSignal: 'PHONE',
+    id: 'tab-switch',
+    title: 'Tab Switch / Window Blur',
+    instruction: 'Switch to another browser tab or click outside the window for 3 seconds.',
+    expectedSignal: 'TAB_SWITCH',
     durationSec: 5,
   },
   {
@@ -54,11 +54,11 @@ export const TEST_SCENARIOS: TestScenario[] = [
     durationSec: 4,
   },
   {
-    id: 'speech-detected',
-    title: 'Continuous Speech / Reading Aloud',
-    instruction: 'Read a paragraph or talk aloud continuously for 10 seconds.',
-    expectedSignal: 'SPEECH',
-    durationSec: 10,
+    id: 'fullscreen-exit',
+    title: 'Exit Fullscreen Mode',
+    instruction: 'Enter Fullscreen mode, then press Esc to exit fullscreen.',
+    expectedSignal: 'FULLSCREEN_EXIT',
+    durationSec: 5,
   },
 ];
 
