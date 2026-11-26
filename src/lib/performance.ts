@@ -36,6 +36,23 @@ export class PerformanceManager {
     return sorted[index];
   }
 
+  getFaceAvg(): number {
+    if (this.faceLatencies.length === 0) return 0;
+    const sum = this.faceLatencies.reduce((acc, v) => acc + v, 0);
+    return sum / this.faceLatencies.length;
+  }
+
+  getLastFaceLatency(): number {
+    if (this.faceLatencies.length === 0) return 0;
+    return this.faceLatencies[this.faceLatencies.length - 1];
+  }
+
+  getCpuDutyCyclePercent(): number {
+    const interval = this.getFaceIntervalMs();
+    if (interval <= 0) return 0;
+    return Math.min(100, (this.getFaceAvg() / interval) * 100);
+  }
+
   getFaceP95(): number {
     return this.calculateP95(this.faceLatencies);
   }
@@ -92,6 +109,9 @@ export class PerformanceManager {
   getStats() {
     return {
       faceP95: this.getFaceP95(),
+      faceAvg: this.getFaceAvg(),
+      faceLast: this.getLastFaceLatency(),
+      cpuDutyCyclePercent: this.getCpuDutyCyclePercent(),
       objectP95: this.getObjectP95(),
       faceIntervalMs: this.getFaceIntervalMs(),
       objectIntervalMs: this.getObjectIntervalMs(),

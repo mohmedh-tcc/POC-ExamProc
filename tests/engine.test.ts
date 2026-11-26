@@ -163,4 +163,23 @@ describe('Leaky Bucket Risk Engine', () => {
     lb.addWeight(4, 'vision', t0);
     expect(lb.getLevel(t0)).toBe('red');
   });
+
+  it('reduces flag points by 50% and disables decay/multiplier when leaky bucket is off', () => {
+    const t0 = 100_000;
+    const lb = new LeakyBucketEngine(t0);
+    lb.setEnabled(false, t0);
+
+    // Vision event (weight 4) -> halved to 2.0
+    const addedVision = lb.addWeight(4, 'vision', t0);
+    expect(addedVision).toBe(2.0);
+
+    // Browser event 10s later (weight 3) -> no 1.5x multiplier, halved to 1.5
+    const t10 = t0 + 10_000;
+    const addedBrowser = lb.addWeight(3, 'browser', t10);
+    expect(addedBrowser).toBe(1.5);
+
+    // After 120s, score does NOT decay when disabled
+    const t130 = t10 + 120_000;
+    expect(lb.getScore(t130)).toBeCloseTo(3.5, 2);
+  });
 });

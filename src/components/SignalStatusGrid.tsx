@@ -10,6 +10,7 @@ interface SignalStatusItem {
 
 interface SignalStatusGridProps {
   signals: Record<SignalType, SignalStatusItem>;
+  leakyBucketEnabled?: boolean;
 }
 
 const ICONS: Record<SignalType, React.ReactNode> = {
@@ -22,15 +23,20 @@ const ICONS: Record<SignalType, React.ReactNode> = {
   FULLSCREEN_EXIT: <Maximize2 className="w-4 h-4 text-orange-400" />,
 };
 
-export const SignalStatusGrid: React.FC<SignalStatusGridProps> = ({ signals }) => {
+export const SignalStatusGrid: React.FC<SignalStatusGridProps> = ({
+  signals,
+  leakyBucketEnabled = true,
+}) => {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg space-y-4">
-      <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-        <h3 className="text-sm font-semibold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
+        <h3 className="text-xs font-semibold text-slate-200 tracking-wide flex items-center gap-2">
           <AlertTriangle className="w-4 h-4 text-amber-400" />
-          Signal State Machines
+          Monitored flags
         </h3>
-        <span className="text-xs text-slate-400">3-State Debounced (2s Release)</span>
+        <span className="text-[11px] text-slate-400">
+          {leakyBucketEnabled ? 'Full weights' : 'Reduced (0.5x)'}
+        </span>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -39,6 +45,7 @@ export const SignalStatusGrid: React.FC<SignalStatusGridProps> = ({ signals }) =
           const item = signals[type] || { state: 'IDLE', activeDurationMs: 0 };
           const isActive = item.state === 'ACTIVE';
           const isReleased = item.state === 'RELEASED';
+          const effectiveWeight = leakyBucketEnabled ? def.weight : def.weight * 0.5;
 
           return (
             <div
@@ -57,8 +64,8 @@ export const SignalStatusGrid: React.FC<SignalStatusGridProps> = ({ signals }) =
                   <span className="font-semibold text-xs text-slate-200">{type}</span>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
-                    wt {def.weight}
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 font-mono">
+                    +{effectiveWeight}
                   </span>
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
