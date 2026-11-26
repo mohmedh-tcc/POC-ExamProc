@@ -260,6 +260,25 @@ POC-ExamProc/
 
 ---
 
+## College Lab Recruitment Exam Context (Updated Scope)
+
+For on-campus college computer lab recruitment exams with minimal human invigilators, the threat model narrows to:
+
+1. **Peeking at a neighbor's screen** $\rightarrow$ `GAZE_OFF_SCREEN` / sustained side glance.
+2. **Phone under the desk** $\rightarrow$ `LOOKING_DOWN` (sustained downward pitch/gaze).
+3. **Tab switching / leaving fullscreen / copy-paste** $\rightarrow$ `TAB_SWITCH`, `FULLSCREEN_EXIT`, `PASTE` (plus optional Safe Exam Browser lockdown).
+4. **Additional lab threats:**
+   - **Whispering / talking to neighbor** $\rightarrow$ `SPEECH` (bandpass energy gate + Silero VAD).
+   - **Neighbor leaning into frame** $\rightarrow$ `EXTRA_FACE` / `EXTRA_PERSON`.
+   - **Camera covering / frozen feed** $\rightarrow$ `NO_FACE` / `CAMERA_FROZEN`.
+
+### Branching Strategy & ONNX Stage A Update
+- **`approach/ONNX`**: Unified `onnxruntime-web` pipeline (`face_detection_yunet_2023mar.onnx` + `mobileone_s0_gaze.onnx`).
+  - **Stage A Parity Verified** (`tests/stage-a-parity.test.ts`): `maxYawDiff = 0.000003°`, `maxPitchDiff = 0.000002°` across 20 frames against upstream `onnx_inference.py`.
+- **`approach/FaceDetector`**: Lightweight MediaPipe `FaceDetector` (BlazeFace 6-keypoint, CPU WASM at 1–2 Hz) + Web Audio bandpass gate for ultra-low-power lab PCs.
+
+---
+
 ## License
 
 This project is licensed under the Apache-2.0 License. All included pre-trained models (`MediaPipe Tasks Vision`, `Silero VAD`) are distributed under their respective permissive open-source licenses.
