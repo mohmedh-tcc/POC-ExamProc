@@ -1,6 +1,7 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { decomposeTransformMatrix, EulerAngles } from '../lib/math/transform-matrix';
 import { computeIrisGaze, IrisGazeResult, NormalizedLandmark } from '../lib/math/iris-gaze';
+import { MouthMotion, MouthMotionTracker } from '../lib/math/mouth-motion';
 import { OneEuroFilter } from '../lib/math/one-euro';
 
 let landmarker: FaceLandmarker | null = null;
@@ -16,14 +17,53 @@ const vRatioFilter = new OneEuroFilter(1.0, 0.007);
 const dxFilter = new OneEuroFilter(1.0, 0.007);
 const dyFilter = new OneEuroFilter(1.0, 0.007);
 
+const mouthTracker = new MouthMotionTracker();
 let previousGaze: IrisGazeResult | undefined = undefined;
 
-// 8x8 grayscale thumbnail for frozen-frame detection
-let prevThumb: Uint8Array | null = null;
+// Zero-allocation 8x8 grayscale buffers for frozen-frame detection
+let prevThumb = new Uint8Array(64);
+let currThumb = new Uint8Array(64);
+let hasPrevThumb = false;
+let prevThumbTs = 0;
+let lastFrozenDiff = 255;
 let thumbCanvas: OffscreenCanvas | null = null;
 let thumbCtx: OffscreenCanvasRenderingContext2D | null = null;
 
-function computeFrozenDiff(bitmap: ImageBitmap): number {
+// Compare frames at a fixed spacing so 8 Hz burst frames don't look frozen
+const FROZEN_MIN_GAP_MS = 450;
+
+function resetTrackers(): void {
+  pitchFilter.reset();
+  yawFilter.reset();
+  rollFilter.reset();
+  hRatioFilter.reset();
+  vRatioFilter.reset();
+  dxFilter.reset();
+  dyFilter.reset();
+  mouthTracker.reset();
+  previousGaze = undefined;
+}
+
+function selectPrimaryFaceIndex(faceLandmarks: NormalizedLandmark[][]): number {
+  if (faceLandmarks.length <= 1) return 0;
+  let bestIdx = 0;
+  let bestSpan = -1;
+  for (let i = 0; i < faceLandmarks.length; i++) {
+    const lm = faceLandmarks[i];
+    const leftEye = lm[33];
+    const rightEye = lm[263];
+    if (!leftEye || !rightEye) continue;
+    const span = Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y);
+    if (span > bestSpan) {
+      bestSpan = span;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+function computeFrozenDiff(bitmap: ImageBitmap, ts: number): number {
+  if (hasPrevThumb && ts - prevThumbTs < FROZEN_MIN_GAP_MS) return lastFrozenDiff;
   if (!thumbCanvas) {
     thumbCanvas = new OffscreenCanvas(8, 8);
     thumbCtx = thumbCanvas.getContext('2d', { willReadFrequently: true });
@@ -32,96 +72,28 @@ function computeFrozenDiff(bitmap: ImageBitmap): number {
 
   thumbCtx.drawImage(bitmap, 0, 0, 8, 8);
   const data = thumbCtx.getImageData(0, 0, 8, 8).data;
-  const curr = new Uint8Array(64);
   for (let i = 0; i < 64; i++) {
     const p = i * 4;
-    curr[i] = Math.round(0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]);
+    currThumb[i] = Math.round(0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]);
   }
 
-  if (!prevThumb) {
-    prevThumb = curr;
-    return 255;
+  prevThumbTs = ts;
+  if (!hasPrevThumb) {
+    const tmp = prevThumb;
+    prevThumb = currThumb;
+    currThumb = tmp;
+    hasPrevThumb = true;
+    return (lastFrozenDiff = 255);
   }
 
   let sum = 0;
   for (let i = 0; i < 64; i++) {
-    sum += Math.abs(curr[i] - prevThumb[i]);
+    sum += Math.abs(currThumb[i] - prevThumb[i]);
   }
-  prevThumb = curr;
-  return sum / 64;
-}
-
-// Rolling Mouth Aspect Ratio (MAR) buffer for visual speaking detection (~2s window @ 5 Hz)
-const marHistory: number[] = [];
-const MAR_WINDOW = 10;
-
-function computeMouthMotion(landmarks: NormalizedLandmark[]): {
-  mar: number;
-  isSpeaking: boolean;
-  motionScore: number;
-} {
-  const upperLip = landmarks[13];
-  const lowerLip = landmarks[14];
-  const leftCorner = landmarks[61];
-  const rightCorner = landmarks[291];
-
-  const mouthWidth = Math.max(
-    0.01,
-    Math.hypot(rightCorner.x - leftCorner.x, rightCorner.y - leftCorner.y)
-  );
-  const lipGap = Math.hypot(lowerLip.x - upperLip.x, lowerLip.y - upperLip.y);
-  const mar = lipGap / mouthWidth;
-
-  marHistory.push(mar);
-  if (marHistory.length > MAR_WINDOW) {
-    marHistory.shift();
-  }
-
-  // Count real open/close cycles using a 0.045 MAR hysteresis to ignore landmark jitter
-  // and static open-mouth postures.
-  const HYST = 0.045;
-  let transitions = 0;
-  let extremum = marHistory[0];
-  let maxMar = marHistory[0];
-  let direction: 0 | 1 | -1 = 0; // 1 = opening, -1 = closing
-
-  for (let i = 1; i < marHistory.length; i++) {
-    const v = marHistory[i];
-    if (v > maxMar) maxMar = v;
-
-    if (direction === 0) {
-      if (v - extremum >= HYST) {
-        direction = 1;
-        extremum = v;
-        transitions++;
-      } else if (extremum - v >= HYST) {
-        direction = -1;
-        extremum = v;
-        transitions++;
-      }
-    } else if (direction === 1) {
-      if (v > extremum) {
-        extremum = v;
-      } else if (extremum - v >= HYST) {
-        direction = -1;
-        extremum = v;
-        transitions++;
-      }
-    } else {
-      if (v < extremum) {
-        extremum = v;
-      } else if (v - extremum >= HYST) {
-        direction = 1;
-        extremum = v;
-        transitions++;
-      }
-    }
-  }
-
-  // Speaking requires >= 3 open/close transitions in the ~2.5s window and meaningful opening
-  const isSpeaking = marHistory.length >= 6 && transitions >= 3 && maxMar > 0.06;
-
-  return { mar, isSpeaking, motionScore: transitions };
+  const tmp = prevThumb;
+  prevThumb = currThumb;
+  currThumb = tmp;
+  return (lastFrozenDiff = sum / 64);
 }
 
 async function initFaceLandmarker(wasmPath: string, modelPath: string) {
@@ -178,7 +150,7 @@ self.onmessage = async (e: MessageEvent) => {
     }
 
     try {
-      const frameDiff = computeFrozenDiff(bitmap);
+      const frameDiff = computeFrozenDiff(bitmap, clientTimestamp);
       // Ensure strictly increasing integer timestamp required by MediaPipe VIDEO mode
       lastTimestamp = Math.max(lastTimestamp + 1, Math.round(clientTimestamp));
       const results = landmarker.detectForVideo(bitmap, lastTimestamp);
@@ -190,15 +162,16 @@ self.onmessage = async (e: MessageEvent) => {
       let rawAngles: EulerAngles | null = null;
       let transformMatrix: number[] | undefined = undefined;
       let gaze: IrisGazeResult | null = null;
-      let mouth: { mar: number; isSpeaking: boolean; motionScore: number } | null = null;
+      let mouth: MouthMotion | null = null;
       let landmarks: NormalizedLandmark[] | null = null;
 
       if (faceCount > 0) {
-        landmarks = results.faceLandmarks[0] as NormalizedLandmark[];
+        const primaryIdx = selectPrimaryFaceIndex(results.faceLandmarks as NormalizedLandmark[][]);
+        landmarks = results.faceLandmarks[primaryIdx] as NormalizedLandmark[];
 
         // 1. Head Pose Euler decomposition + raw 4x4 matrix
-        if (results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
-          const matrix = results.facialTransformationMatrixes[0];
+        const matrix = results.facialTransformationMatrixes?.[primaryIdx];
+        if (matrix) {
           transformMatrix = Array.from(matrix.data);
           rawAngles = decomposeTransformMatrix(matrix.data);
 
@@ -210,7 +183,7 @@ self.onmessage = async (e: MessageEvent) => {
           };
         }
 
-        // 2. Aspect-corrected, yaw-foreshortening-compensated Iris Gaze estimation
+        // 2. Aspect-corrected, yaw-foreshortening-compensated Iris Gaze & Mouth Motion
         if (landmarks) {
           const aspectRatio = bitmap.width / Math.max(1, bitmap.height);
           const headYawRad = angles ? (angles.yaw * Math.PI) / 180 : 0;
@@ -231,10 +204,10 @@ self.onmessage = async (e: MessageEvent) => {
             gaze = rawGaze;
           }
           previousGaze = gaze;
-          mouth = computeMouthMotion(landmarks);
+          mouth = mouthTracker.update(landmarks, bitmap.width, bitmap.height, clientTimestamp, headYawRad);
         }
       } else {
-        marHistory.length = 0;
+        resetTrackers();
       }
 
       self.postMessage({

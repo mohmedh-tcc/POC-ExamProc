@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { SignalType } from '../lib/engine/state-machine';
-import { Play, Check, X, ShieldAlert, Award } from 'lucide-react';
+import { Play, Check, X, Award } from 'lucide-react';
 
 export interface TestScenario {
   id: string;
@@ -70,37 +70,33 @@ export const TestRunner: React.FC<TestRunnerProps> = ({ activeSignals }) => {
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
   const [countdown, setCountdown] = useState<number>(0);
   const [results, setResults] = useState<Record<string, { passed: boolean; detected: SignalType[] }>>({});
-  const [detectedDuringTest, setDetectedDuringTest] = useState<Set<SignalType>>(new Set());
+  const activeSignalsRef = useRef(activeSignals);
+  activeSignalsRef.current = activeSignals;
 
   const startTest = (index: number) => {
     const scenario = TEST_SCENARIOS[index];
     setRunningIndex(index);
     setCountdown(scenario.durationSec);
-    setDetectedDuringTest(new Set());
 
+    const seen = new Set<SignalType>();
     const startTime = Date.now();
     const interval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       const remaining = scenario.durationSec - elapsed;
 
-      // Track any active signal fired during this window
-      activeSignals.forEach((sig) => {
-        setDetectedDuringTest((prev) => new Set(prev).add(sig));
-      });
+      // Read live signals from ref so the interval closure isn't stuck on initial render
+      activeSignalsRef.current.forEach((sig) => seen.add(sig));
 
       if (remaining <= 0) {
         clearInterval(interval);
         setRunningIndex(null);
         setCountdown(0);
 
-        // Evaluate pass/fail
-        const detectedArray = Array.from(detectedDuringTest);
-        let passed = false;
-        if (scenario.expectedSignal === 'NONE') {
-          passed = detectedArray.length === 0;
-        } else {
-          passed = detectedArray.includes(scenario.expectedSignal);
-        }
+        const detectedArray = Array.from(seen);
+        const passed =
+          scenario.expectedSignal === 'NONE'
+            ? detectedArray.length === 0
+            : detectedArray.includes(scenario.expectedSignal);
 
         setResults((prev) => ({
           ...prev,

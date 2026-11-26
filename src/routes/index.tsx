@@ -11,6 +11,7 @@ import {
   DebounceState,
 } from '../lib/engine/state-machine';
 import { LeakyBucketEngine, RiskLevel } from '../lib/engine/leaky-bucket';
+import { RollingFlags } from '../lib/engine/rolling-window';
 import { IrisGazeResult } from '../lib/math/iris-gaze';
 import { VideoFeed } from '../components/VideoFeed';
 import { Gauges } from '../components/Gauges';
@@ -25,6 +26,8 @@ interface PerformanceMemory {
   usedJSHeapSize: number;
 }
 
+const EMPTY_DETECTIONS: never[] = [];
+
 export const DiagnosticPlayground: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const pipelineRef = useRef<CameraPipeline | null>(null);
@@ -34,6 +37,8 @@ export const DiagnosticPlayground: React.FC = () => {
   calibrationRef.current = calibration;
 
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
+  const isCalibrationOpenRef = useRef(false);
+  isCalibrationOpenRef.current = isCalibrationOpen;
   const [fastDevMode, setFastDevMode] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showTestRunner, setShowTestRunner] = useState(false);
@@ -47,14 +52,16 @@ export const DiagnosticPlayground: React.FC = () => {
   const [mouth, setMouth] = useState<MouthMotionEvent | null>(null);
   const [keyPoints, setKeyPoints] = useState<Array<{ x: number; y: number; z: number }> | null>(null);
   const [showMesh, setShowMesh] = useState(false);
+  const showMeshRef = useRef(false);
+  showMeshRef.current = showMesh;
 
   const [perfStats, setPerfStats] = useState({
     faceP95: 0,
     faceAvg: 0,
     faceLast: 0,
     cpuDutyCyclePercent: 0,
-    faceIntervalMs: 200,
-    faceFps: 5,
+    faceIntervalMs: 500,
+    faceFps: 2,
     isDegraded: false,
   });
   const [jsHeapMb, setJsHeapMb] = useState<number | null>(null);
@@ -109,8 +116,9 @@ export const DiagnosticPlayground: React.FC = () => {
     FULLSCREEN_EXIT: { type: 'FULLSCREEN_EXIT', state: 'IDLE', activeDurationMs: 0 },
   });
 
-  const noFaceHistory = useRef<boolean[]>([]);
-  const extraFaceHistory = useRef<boolean[]>([]);
+  // Time-based windows so thresholds hold at 2 Hz idle, 8 Hz burst, and under throttling
+  const noFaceWindow = useRef(new RollingFlags(3500));
+  const extraFaceWindow = useRef(new RollingFlags(1250));
   const warmupSamplesRef = useRef<CalibrationSample[]>([]);
 
   const activeSignalsSet = useMemo(() => {
@@ -132,14 +140,20 @@ export const DiagnosticPlayground: React.FC = () => {
       leakyBucket.addWeight(res.sustainedBonus, sm.family, now);
     }
 
-    setSignalStatuses((prev) => ({
-      ...prev,
-      [type]: {
-        type,
-        state: res.state,
-        activeDurationMs: res.activeDurationMs,
-      },
-    }));
+    setSignalStatuses((prev) => {
+      const cur = prev[type];
+      if (cur.state === res.state && cur.activeDurationMs === res.activeDurationMs) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [type]: {
+          type,
+          state: res.state,
+          activeDurationMs: res.activeDurationMs,
+        },
+      };
+    });
   }, [leakyBucket, pushToast]);
 
   // Sync Fast Dev Mode (1s onset) vs Exam Mode (3s/4s onset)
@@ -196,23 +210,23 @@ export const DiagnosticPlayground: React.FC = () => {
         const now = Date.now();
         setFaceCount(data.faceCount);
         setAngles(data.angles);
-        setTransformMatrix(data.transformMatrix);
+        if (isCalibrationOpenRef.current) {
+          setTransformMatrix(data.transformMatrix);
+        }
         setGaze(data.gaze);
         setMouth(data.mouth);
-        setKeyPoints(data.keyPoints);
+        if (showMeshRef.current) {
+          setKeyPoints(data.keyPoints);
+        }
         setPerfStats(pipeline.performance.getStats());
 
-        // 1. NO_FACE (at 4 Hz, 14 frames ~ 3.5s)
-        noFaceHistory.current.push(data.faceCount === 0);
-        if (noFaceHistory.current.length > 14) noFaceHistory.current.shift();
-        const noFaceCount = noFaceHistory.current.filter(Boolean).length;
-        const noFaceActive = noFaceHistory.current.length >= 8 && noFaceCount / noFaceHistory.current.length >= 0.9;
+        // 1. NO_FACE: >= 90% of the last 3.5 s, once at least 2 s are covered
+        noFaceWindow.current.push(data.faceCount === 0, now);
+        const noFaceActive = (noFaceWindow.current.fraction(2000) ?? 0) >= 0.9;
 
-        // 2. EXTRA_FACE
-        extraFaceHistory.current.push(data.faceCount >= 2);
-        if (extraFaceHistory.current.length > 5) extraFaceHistory.current.shift();
-        const extraFaceCount = extraFaceHistory.current.filter(Boolean).length;
-        const extraFaceActive = extraFaceHistory.current.length >= 3 && extraFaceCount >= 2;
+        // 2. EXTRA_FACE: >= 40% of the last 1.25 s, once at least 0.75 s are covered
+        extraFaceWindow.current.push(data.faceCount >= 2, now);
+        const extraFaceActive = (extraFaceWindow.current.fraction(750) ?? 0) >= 0.4;
 
         // 3. FROZEN_FEED
         const isFrozen = data.frameDiff < 0.5;
@@ -225,7 +239,11 @@ export const DiagnosticPlayground: React.FC = () => {
         updateSignal('FROZEN_FEED', isFrozen, now);
         updateSignal('SPEAKING_VISUAL', isSpeakingVisual, now);
 
-        if (data.faceCount === 0 || !data.angles) return;
+        if (data.faceCount === 0 || !data.angles) {
+          updateSignal('HEAD_OFF_SCREEN', false, now);
+          updateSignal('LOOKING_DOWN', false, now);
+          return;
+        }
 
         // Auto-baseline warmup on first 10 valid frames
         let cal = calibrationRef.current;
@@ -275,6 +293,11 @@ export const DiagnosticPlayground: React.FC = () => {
     };
   }, [updateSignal]);
 
+  // Warm-up (no baseline yet) and calibration modal need every sample, so run at burst rate.
+  useEffect(() => {
+    pipelineRef.current?.setForceBurst(isCalibrationOpen || !calibration);
+  }, [isCalibrationOpen, calibration]);
+
   // Poll risk score, tab focus, JS heap, and main thread lag every 500ms
   useEffect(() => {
     let lastTick = performance.now();
@@ -290,7 +313,8 @@ export const DiagnosticPlayground: React.FC = () => {
         setJsHeapMb(mem.usedJSHeapSize / (1024 * 1024));
       }
 
-      setRiskScore(leakyBucket.getScore(nowMs));
+      const nextScore = leakyBucket.getScore(nowMs);
+      setRiskScore((prev) => (Math.abs(nextScore - prev) >= 0.05 ? nextScore : prev));
       setRiskLevel(leakyBucket.getLevel(nowMs));
       const lostFocus = document.hidden || !document.hasFocus();
       updateSignal('TAB_SWITCH', lostFocus, nowMs);
@@ -428,7 +452,7 @@ export const DiagnosticPlayground: React.FC = () => {
             <VideoFeed
               videoRef={videoRef}
               keyPoints={keyPoints}
-              objectDetections={[]}
+              objectDetections={EMPTY_DETECTIONS}
               showMesh={showMesh}
               onToggleMesh={() => setShowMesh(!showMesh)}
               faceCount={faceCount}

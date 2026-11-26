@@ -3,9 +3,12 @@ export class PerformanceManager {
   private objectLatencies: number[] = [];
   private readonly maxWindow = 30;
 
-  // Face rate steps: 4 Hz (250ms) -> 3 Hz (333ms) -> 2 Hz (500ms)
-  private readonly faceRates = [250, 333, 500];
+  // Two cadences: 2 Hz idle for pose/face-count; 8 Hz burst while lips move, extra face appears, or calibrating.
+  private readonly idleMs = 500;
+  private readonly burstMs = 125;
+  private readonly faceScales = [1, 4 / 3, 2];
   private faceRateIndex = 0;
+  private burst = false;
 
   // Object interval steps: 2.5s (2500ms) -> 4.0s (4000ms) -> 6.0s (6000ms)
   private readonly objectIntervals = [2500, 4000, 6000];
@@ -65,9 +68,9 @@ export class PerformanceManager {
     if (this.faceLatencies.length >= 10) {
       const p95 = this.getFaceP95();
       // Budget: 120 ms
-      if (p95 > 120 && this.faceRateIndex < this.faceRates.length - 1) {
+      if (p95 > 120 && this.faceRateIndex < this.faceScales.length - 1) {
         this.faceRateIndex += 1;
-        console.warn(`Face Landmarker P95 (${p95.toFixed(1)}ms) exceeded budget. Throttling interval to ${this.faceRates[this.faceRateIndex]}ms`);
+        console.warn(`Face Landmarker P95 (${p95.toFixed(1)}ms) exceeded budget. Throttling interval to ${this.getFaceIntervalMs()}ms`);
       } else if (p95 < 70 && this.faceRateIndex > 0) {
         // Step back up if performance recovered
         this.faceRateIndex -= 1;
@@ -85,13 +88,17 @@ export class PerformanceManager {
     }
 
     // Degraded coverage check: if at lowest rate and still over budget
-    const faceAtFloor = this.faceRateIndex === this.faceRates.length - 1;
+    const faceAtFloor = this.faceRateIndex === this.faceScales.length - 1;
     const faceOverBudget = this.getFaceP95() > 120;
     this.isDegraded = faceAtFloor && faceOverBudget;
   }
 
+  setBurst(burst: boolean): void {
+    this.burst = burst;
+  }
+
   getFaceIntervalMs(): number {
-    return this.faceRates[this.faceRateIndex];
+    return Math.round((this.burst ? this.burstMs : this.idleMs) * this.faceScales[this.faceRateIndex]);
   }
 
   getObjectIntervalMs(): number {

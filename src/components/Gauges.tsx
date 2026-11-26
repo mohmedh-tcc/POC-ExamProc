@@ -100,7 +100,7 @@ export const Gauges: React.FC<GaugesProps> = ({ angles, gaze, mouth, calibration
           <div className="relative w-full h-2 bg-slate-800 rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-100 ${isSpeaking ? 'bg-pink-500' : 'bg-emerald-500'}`}
-              style={{ width: `${Math.max(0, Math.min(100, (mar / 0.5) * 100))}%` }}
+              style={{ width: `${Math.max(0, Math.min(100, (mar / 0.375) * 100))}%` }}
             />
           </div>
         </div>
